@@ -157,6 +157,17 @@ impl Tui {
         self.push_styled_lines_with_hyperlinks(lines, &[], 0);
     }
 
+    /// One dim line carrying a single OSC-8 hyperlink over `link.column_range`
+    /// (byte columns in the unstyled line). Same dim rendering as `push_dim`,
+    /// plus a clickable span — for paths that must not wrap mid-URL.
+    pub fn push_dim_hyperlink(&mut self, line: String, link: HyperlinkTarget) {
+        let styled = Line::from(vec![Span::styled(
+            line,
+            Style::new().add_modifier(Modifier::DIM),
+        )]);
+        self.push_styled_lines_with_hyperlinks(vec![styled], &[link], 0);
+    }
+
     pub fn push_action(&mut self, text: &str, detail: Option<&str>) {
         let mut spans = vec![
             Span::styled(

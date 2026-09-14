@@ -100,31 +100,45 @@ pub(crate) fn handle_tasks(
         let mut t = shared.lock().expect("tui lock");
         t.push_action("Background tasks", Some(&format!("· {header}")));
         for task in &live {
+            // OSC-8 linked log path (not a bare URL): a raw `file://…` can
+            // wrap mid-URL on narrow terminals and break the click — the
+            // dogfood run showed `t\n1.log`. Display text is the short
+            // `~/…` form (the tool's own `home_relative` idiom), never the
+            // absolute path; the full path rides in the hyperlink.
             t.push_dim(tasks_view::task_row(task));
-            t.push_dim(format!(
-                "  log {} (file://{}) \u{b7} shell_output(task_id=\"{}\") \u{b7} shell_kill(task_id=\"{}\")",
-                task.log_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| task.log_path.to_string_lossy().into_owned()),
-                task.log_path.to_string_lossy(),
-                task.id,
-                task.id,
-            ));
+            let abs = task.log_path.to_string_lossy();
+            let home = std::env::var("HOME").unwrap_or_default();
+            let display = if !home.is_empty() {
+                abs.strip_prefix(&home)
+                    .map(|rest| format!("~{rest}"))
+                    .unwrap_or_else(|| abs.into_owned())
+            } else {
+                format!("~/{abs}")
+            };
+            let url = format!("file://{}", task.log_path.to_string_lossy());
+            let tail = format!(
+                " \u{b7} shell_output(task_id=\"{}\") \u{b7} shell_kill(task_id=\"{}\")",
+                task.id, task.id,
+            );
+            let prefix = "  log ";
+            let start = prefix.len();
+            let end = start + display.len();
+            t.push_dim_hyperlink(
+                format!("{prefix}{display}{tail}"),
+                gray_markdown::HyperlinkTarget {
+                    line_index: 0,
+                    column_range: start..end,
+                    url,
+                    id: 0,
+                },
+            );
         }
         t.ensure_gap(1);
     } else {
         println!("✓ Background tasks · {header}");
         for task in &live {
             println!("  {}", tasks_view::task_row(task));
-            println!(
-                "    log {} (file://{})",
-                task.log_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| task.log_path.to_string_lossy().into_owned()),
-                task.log_path.to_string_lossy()
-            );
+            println!("    log ~/{}", task.log_path.to_string_lossy());
         }
     }
 }
