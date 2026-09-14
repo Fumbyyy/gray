@@ -20,15 +20,17 @@ pub fn running<'a>(tasks: &'a [TaskInfo]) -> Vec<&'a TaskInfo> {
 
 /// Status-row suffix for the `⬡ Working…` pill / idle footer.
 ///
+/// Count form only — never the raw `t1` id (ugly in chrome; the id stays
+/// visible in `/tasks` rows where it's the `shell_output`/`shell_kill`
+/// handle).
 /// - 0 live → `None` (row and footer render exactly as today — no shift).
-/// - 1 live → `"t1 running"`.
+/// - 1 live → `"1 bg task running"`.
 /// - n live → `"N bg tasks"`. The caller appends the `/tasks to view` hint
 ///   when width allows; kept separate so truncation drops the hint first.
 pub fn status_suffix(tasks: &[TaskInfo]) -> Option<String> {
-    let live = running(tasks);
-    match live.len() {
+    match running(tasks).len() {
         0 => None,
-        1 => Some(format!("{} running", live[0].id)),
+        1 => Some("1 bg task running".to_string()),
         n => Some(format!("{n} bg tasks")),
     }
 }
@@ -62,8 +64,9 @@ pub fn fmt_task_bytes(bytes: u64) -> String {
     format!("{:.1}M", b / (K * K))
 }
 
-/// One `/tasks` detail row:
-/// `• t1 · pid 13941 · 8m · 12.4k logged · while true; do echo…`
+/// One `/tasks` detail row, command first (the id is the
+/// `shell_output`/`shell_kill` handle, not the headline):
+/// `• sleep 120 · t1 · pid 3861 · 12s · 0 logged`
 pub fn task_row(task: &TaskInfo) -> String {
     let elapsed = fmt_task_elapsed(task.started.elapsed().as_secs());
     let logged = fmt_task_bytes(task.bytes);
@@ -74,7 +77,7 @@ pub fn task_row(task: &TaskInfo) -> String {
         cmd
     };
     format!(
-        "• {} · pid {} · {elapsed} · {logged} logged · {cmd}",
+        "• {cmd} · {} · pid {} · {elapsed} · {logged} logged",
         task.id, task.pid
     )
 }
@@ -114,8 +117,11 @@ mod tests {
     }
 
     #[test]
-    fn suffix_single_names_the_task() {
-        assert_eq!(status_suffix(&[task(1, "sleep 60")]), Some("t1 running".to_string()));
+    fn suffix_single_counts_not_names() {
+        assert_eq!(
+            status_suffix(&[task(1, "sleep 60")]),
+            Some("1 bg task running".to_string())
+        );
     }
 
     #[test]
@@ -139,11 +145,15 @@ mod tests {
     }
 
     #[test]
-    fn row_truncates_long_commands() {
+    fn row_leads_with_command() {
         let long = "x".repeat(200);
         let row = task_row(&task(1, &long));
-        assert!(row.ends_with("…"), "long command truncates: {row}");
+        assert!(row.starts_with("• xxx"), "command leads: {row}");
+        assert!(row.contains("… · t1 · pid"), "long command truncates: {row}");
         let short = task_row(&task(1, "sleep 60"));
-        assert!(short.ends_with("sleep 60"), "short command intact: {short}");
+        assert!(
+            short.starts_with("• sleep 60 · t1 · pid 1001 · "),
+            "command first, id kept as handle: {short}"
+        );
     }
 }
