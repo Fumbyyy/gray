@@ -107,7 +107,7 @@ pub(crate) use session::{
     persist_turn_messages, print_exit_hint,
 };
 pub(crate) use status::{
-    SessionTotals, handle_compact, handle_context_window, handle_usage, turn_footer,
+    SessionTotals, handle_compact, handle_context_window, handle_tasks, handle_usage, turn_footer,
 };
 pub(crate) use user_cmds::handle_feedback;
 

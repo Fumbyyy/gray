@@ -210,6 +210,13 @@ pub(crate) async fn dispatch_command(
             handle_usage(session_totals, config, tui.as_ref().map(|(s, _)| s));
             Flow::Continue
         }
+        ReplCommand::Tasks => {
+            handle_tasks(
+                session_state.as_ref().map(|s| s.session_id.as_str()),
+                tui.as_ref().map(|(s, _)| s),
+            );
+            Flow::Continue
+        }
         ReplCommand::Feedback(text) => {
             handle_feedback(text, config, session_state, tui.as_ref().map(|(s, _)| s));
             Flow::Continue

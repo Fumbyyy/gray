@@ -67,6 +67,68 @@ pub(crate) fn turn_footer(
     }
 }
 
+
+/// Handles `/tasks` / `/ps`: live background shell tasks for this session.
+/// TUI renders like `/usage` — `✓` action header + dim detail rows with
+/// log file links; headless prints the same lines plain.
+pub(crate) fn handle_tasks(
+    session_id: Option<&str>,
+    tui: Option<&crate::composer::SharedTui>,
+) {
+    use gray_tools::shell::tasks_view;
+    let key = crate::shell_drain::shell_session_key(session_id);
+    let reg = gray_tools::shell::registry::registry();
+    let tasks = reg.list(&key);
+    let live = tasks_view::running(&tasks);
+    if live.is_empty() {
+        if let Some(shared) = tui {
+            let mut t = shared.lock().expect("tui lock");
+            t.push_action("Background tasks", None);
+            t.push_dim("No background tasks running".to_string());
+            t.ensure_gap(1);
+        } else {
+            println!("✓ Background tasks\n  No background tasks running");
+        }
+        return;
+    }
+    let header = if live.len() == 1 {
+        "1 task running".to_string()
+    } else {
+        format!("{} tasks running", live.len())
+    };
+    if let Some(shared) = tui {
+        let mut t = shared.lock().expect("tui lock");
+        t.push_action("Background tasks", Some(&format!("· {header}")));
+        for task in &live {
+            t.push_dim(tasks_view::task_row(task));
+            t.push_dim(format!(
+                "  log {} (file://{}) \u{b7} shell_output(task_id=\"{}\") \u{b7} shell_kill(task_id=\"{}\")",
+                task.log_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| task.log_path.to_string_lossy().into_owned()),
+                task.log_path.to_string_lossy(),
+                task.id,
+                task.id,
+            ));
+        }
+        t.ensure_gap(1);
+    } else {
+        println!("✓ Background tasks · {header}");
+        for task in &live {
+            println!("  {}", tasks_view::task_row(task));
+            println!(
+                "    log {} (file://{})",
+                task.log_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| task.log_path.to_string_lossy().into_owned()),
+                task.log_path.to_string_lossy()
+            );
+        }
+    }
+}
+
 /// Handles `/usage` / `/cost`: session totals plus the active model's rate.
 /// TUI renders like `/model` — `✓` action header + dim detail lines.
 pub(crate) fn handle_usage(

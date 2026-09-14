@@ -105,6 +105,16 @@ pub fn set_drain_session(session: &str) {
     }
 }
 
+/// Background-task status suffix for the `⬡ Working…` pill and idle footer.
+/// Draw-time registry query under the drain session key (`"nosession"` before
+/// the first turn, so pre-session tasks still show). `None` when nothing is
+/// live — callers render exactly as before.
+pub fn bg_status_suffix() -> Option<String> {
+    let reg = gray_tools::shell::registry::registry();
+    let tasks = reg.list(&drain_session());
+    gray_tools::shell::tasks_view::status_suffix(&tasks)
+}
+
 fn drain_session() -> String {
     CURRENT_SESSION
         .lock()

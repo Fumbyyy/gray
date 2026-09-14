@@ -146,7 +146,14 @@ pub(crate) fn draw(tui: &mut Tui) -> anyhow::Result<()> {
                 None => super::pill_elapsed(turn_started, *started, is_task_running),
             };
             let elapsed_str = format!("{:.1}s", elapsed.as_secs_f64());
-            let suffix = format!(" {elapsed_str}{pill_tok_suffix} (esc to interrupt)");
+            // Background-task suffix (Codex `/ps` parity): draw-time
+            // registry query, so no begin/end sync state can go stale.
+            // `None` (no live tasks) renders exactly as before.
+            let bg_suffix = crate::shell_drain::bg_status_suffix();
+            let suffix = match &bg_suffix {
+                Some(bg) => format!(" {elapsed_str}{pill_tok_suffix} (esc to interrupt) · {bg}"),
+                None => format!(" {elapsed_str}{pill_tok_suffix} (esc to interrupt)"),
+            };
             spans.push(Span::styled(
                 suffix,
                 Style::default().fg(crate::theme::theme().tool_dim),
@@ -371,13 +378,20 @@ pub(crate) fn draw(tui: &mut Tui) -> anyhow::Result<()> {
                 ),
             ]
         };
+        // Idle fallback for the bg-task suffix (the `⬡` row doesn't exist
+        // when no turn runs): appended to the footer right, same `·` idiom.
+        let bg_suffix = crate::shell_drain::bg_status_suffix();
+        let bg_len = bg_suffix
+            .as_ref()
+            .map(|bg| 3 + display_width(bg))
+            .unwrap_or(0);
         let right_len = if model_display.is_empty() {
             display_width(&effort_display)
         } else if effort_display.is_empty() {
             display_width(&model_display)
         } else {
             display_width(&model_display) + 3 + display_width(&effort_display)
-        };
+        } + bg_len;
         let left_len = 1 + display_width(&ctx_display) + 3 + display_width(&cache_display);
         let pad_len = w.saturating_sub(left_len + right_len);
 
@@ -399,6 +413,19 @@ pub(crate) fn draw(tui: &mut Tui) -> anyhow::Result<()> {
             ),
             Span::styled(cache_display, Style::default().fg(cache_color)),
         ];
+        let mut right_parts = right_parts;
+        if let Some(bg) = &bg_suffix {
+            if !right_parts.is_empty() {
+                right_parts.push(Span::styled(
+                    " \u{b7} ",
+                    Style::default().fg(crate::theme::theme().text_faint),
+                ));
+            }
+            right_parts.push(Span::styled(
+                bg.clone(),
+                Style::default().fg(crate::theme::theme().tool_dim),
+            ));
+        }
         footer_spans.push(Span::raw(" ".repeat(pad_len)));
         footer_spans.extend(right_parts);
         if footer_y < area.y + area.height {

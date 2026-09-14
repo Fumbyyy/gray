@@ -47,6 +47,11 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
         aliases: &["cost"],
     },
     CmdDef {
+        name: "tasks",
+        desc: "list background tasks",
+        aliases: &["ps"],
+    },
+    CmdDef {
         name: "feedback",
         desc: "send feedback",
         aliases: &[],
@@ -398,6 +403,8 @@ pub enum ReplCommand {
     ContextWindow(Option<String>),
     /// Session token + cost totals (`/usage` or `/cost`).
     Usage,
+    /// Background shell tasks (`/tasks` or `/ps`).
+    Tasks,
     /// Send feedback (`/feedback <what happened>`): saves locally, opens a prefilled issue.
     Feedback(Option<String>),
     /// Unknown slash command (`/word`).
@@ -501,6 +508,7 @@ pub fn parse_command(line: &str) -> ReplCommand {
         Some("thinking") => ReplCommand::Thinking(opt(rest)),
         Some("context") => ReplCommand::ContextWindow(opt(rest)),
         Some("usage") => ReplCommand::Usage,
+        Some("tasks") => ReplCommand::Tasks,
         Some("feedback") => ReplCommand::Feedback(opt(rest)),
         Some("help") => ReplCommand::Help,
         // Every connect alias accepts optional args like `/key openrouter`
@@ -575,6 +583,8 @@ mod tests {
     #[test]
     fn usage_command_and_cost_alias() {
         assert!(matches!(parse_command("/usage"), ReplCommand::Usage));
+        assert!(matches!(parse_command("/tasks"), ReplCommand::Tasks));
+        assert!(matches!(parse_command("/ps"), ReplCommand::Tasks));
         assert!(matches!(parse_command("/cost"), ReplCommand::Usage));
         use std::path::Path;
         let cwd = Path::new(".");

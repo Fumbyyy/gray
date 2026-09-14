@@ -8,6 +8,7 @@ pub mod pump;
 pub mod registry;
 pub mod spawn;
 pub mod split;
+pub mod tasks_view;
 pub mod tools;
 pub mod view;
 pub mod wake;
