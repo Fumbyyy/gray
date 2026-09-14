@@ -138,6 +138,38 @@ pub(crate) fn say(tui: Option<&crate::composer::SharedTui>, msg: &str) {
     }
 }
 
+/// Unified `✓ Context compacted` transcript card for the threshold / overflow /
+/// manual paths (same numbers, same shape — no per-path dialect).
+/// Lands in transcript scrollback (`insert_before`) like normal chats: `✓`
+/// action header + two detail lines, never the status dock, never dim `└`
+/// lines. Headless falls back to plain stdout.
+pub(crate) fn say_compaction(
+    tui: Option<&crate::composer::SharedTui>,
+    elapsed_str: &str,
+    before_tokens: usize,
+    after_tokens: usize,
+    before_msgs: usize,
+    after_msgs: usize,
+    window: usize,
+) {
+    let (tokens_line, msgs_line) = crate::compact::compaction_card_lines(
+        before_tokens,
+        after_tokens,
+        before_msgs,
+        after_msgs,
+        window,
+    );
+    if let Some(shared) = tui {
+        let mut t = shared.lock().expect("tui lock");
+        t.push_action("Context compacted", Some(&format!("· {elapsed_str}")));
+        t.push_dim(format!("  {tokens_line}"));
+        t.push_dim(format!("  {msgs_line}"));
+        t.ensure_gap(1);
+    } else {
+        println!("✓ Context compacted · {elapsed_str}\n  {tokens_line}\n  {msgs_line}");
+    }
+}
+
 /// Split a `/name argv…` line into (`/name`, argv words) for plugin
 /// slash-command routing. `None` when the line isn't a slash command.
 fn split_plugin_command(line: &str) -> Option<(String, Vec<String>)> {

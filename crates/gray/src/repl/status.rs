@@ -473,6 +473,8 @@ pub(crate) async fn handle_compact(
     }
 
     let msg_count = messages.len();
+    let window = crate::setup::resolve_model_context_length(config.model.as_deref().unwrap_or(""));
+    let before_tokens = crate::compact::estimate_context_tokens(&messages, None);
 
     // Codex `/compact` parity (`slash_dispatch.rs`): raise `Compacting
     // context` with its own clock before the backend work; the input box
@@ -493,7 +495,7 @@ pub(crate) async fn handle_compact(
     .await;
 
     // Restore idle (manual has no turn to return to) in the same lock;
-    // the `Context compacted` line below is the single completion signal.
+    // the transcript card below is the single completion signal.
     let elapsed = tui
         .and_then(|shared| {
             shared
@@ -516,24 +518,37 @@ pub(crate) async fn handle_compact(
                     .await;
             }
 
+            let after_tokens = crate::compact::estimate_context_tokens(ag.messages(), None);
+            let after_msgs = ag.messages().len();
             // History just shrank (see session.rs threshold path): reseed
             // the gauge to the compacted size instead of the stale StepUsage.
             if let Some(shared) = tui {
-                let est = crate::compact::estimate_context_tokens(ag.messages(), None);
-                shared.lock().expect("tui lock").seed_estimate_usage(est);
+                shared
+                    .lock()
+                    .expect("tui lock")
+                    .seed_estimate_usage(after_tokens);
             }
 
+            // Same card as the threshold / overflow paths; the manual summary
+            // follows as a normal chat message, not dim `└` output.
+            say_compaction(
+                tui,
+                &elapsed_str,
+                before_tokens,
+                after_tokens,
+                msg_count,
+                after_msgs,
+                window,
+            );
             if let Some(shared) = tui {
+                let lines: Vec<ratatui::text::Line<'static>> = summary
+                    .split('\n')
+                    .map(|l| ratatui::text::Line::from(l.to_string()))
+                    .collect();
                 let mut tui = shared.lock().expect("tui lock");
-                tui.ensure_gap(1);
-                tui.push_dim(format!(
-                    "└ Context compacted · {elapsed_str} ({msg_count} messages -> summary)"
-                ));
-                tui.ensure_gap(1);
-                tui.push_dim(summary);
+                tui.push_styled_lines_with_hyperlinks(lines, &[], 0);
                 tui.ensure_gap(1);
             } else {
-                println!("Context compacted · {elapsed_str} ({msg_count} messages -> summary)\n");
                 println!("{summary}\n");
             }
         }

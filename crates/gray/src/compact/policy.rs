@@ -48,6 +48,41 @@ pub fn compaction_settings_for(window: usize) -> CompactionSettings {
     }
 }
 
+/// Numbers for the unified `✓ Context compacted` transcript card.
+/// One builder for the threshold / overflow / manual paths so all three read
+/// identically: `(tokens_line, msgs_line)` rendered under a
+/// `✓ Context compacted · {elapsed}` header.
+pub fn compaction_card_lines(
+    before_tokens: usize,
+    after_tokens: usize,
+    before_msgs: usize,
+    after_msgs: usize,
+    window: usize,
+) -> (String, String) {
+    let f = crate::setup::format_context_length;
+    let saved = before_tokens.saturating_sub(after_tokens);
+    let pct = |part: usize, whole: usize| {
+        if whole == 0 {
+            0
+        } else {
+            ((part as f64 / whole as f64) * 100.0).round() as usize
+        }
+    };
+    let tokens_line = format!(
+        "{} → {} tokens · saved {} ({}%)",
+        f(before_tokens),
+        f(after_tokens),
+        f(saved),
+        pct(saved, before_tokens),
+    );
+    let msgs_line = format!(
+        "{before_msgs} → {after_msgs} messages · now {}% of {} window",
+        pct(after_tokens, window),
+        f(window),
+    );
+    (tokens_line, msgs_line)
+}
+
 pub fn estimate_tokens(msg: &Message) -> usize {
     // Must measure billable context, not displayable prose: a message whose
     // only block is a 50 KiB tool result is ~12.8k tokens, not 0. See

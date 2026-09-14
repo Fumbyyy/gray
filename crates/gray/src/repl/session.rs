@@ -525,6 +525,7 @@ pub(crate) async fn maybe_threshold_compact(
     // dedicated `Compacting context` status with its own clock BEFORE the
     // summarization call. The input box stays mounted — only the status dock
     // changes — so the chat box can never disappear mid-compact.
+    let before_msgs = agent.messages().len();
     let compaction_id = format!("auto-{}", uuid::Uuid::new_v4().as_simple());
     if let Some(shared) = tui {
         shared
@@ -534,9 +535,9 @@ pub(crate) async fn maybe_threshold_compact(
     }
     match crate::compact::auto_compact_if_needed(agent).await {
         Ok(true) => {
-            // Codex `on_context_compaction_completed`: single
-            // `Context compacted · {elapsed}` line, then header back to
-            // `Working`. The turn clock underneath is untouched.
+            // Codex `on_context_compaction_completed`: single transcript card,
+            // then header back to `Working`. The turn clock underneath is
+            // untouched.
             let elapsed = tui
                 .and_then(|shared| {
                     shared
@@ -545,21 +546,27 @@ pub(crate) async fn maybe_threshold_compact(
                         .finish_compaction(&compaction_id, Some("Working"))
                 })
                 .unwrap_or_default();
-            let notice = format!(
-                "Context compacted · {} ({}/{} tokens)",
-                crate::composer::fmt_elapsed_compact(elapsed.as_secs()),
-                crate::setup::format_context_length(tokens),
-                crate::setup::format_context_length(window)
-            );
-            say(tui, &notice);
+            let after_tokens = crate::compact::estimate_context_tokens(agent.messages(), None);
+            let after_msgs = agent.messages().len();
             // History just shrank: the gauge still holds the pre-compact
             // StepUsage (stale-high until the next turn's first StepUsage).
             // Reseed from the post-compact estimate so the footer, /context,
             // and the next trigger all see the compacted size immediately.
             if let Some(shared) = tui {
-                let est = crate::compact::estimate_context_tokens(agent.messages(), None);
-                shared.lock().expect("tui lock").seed_estimate_usage(est);
+                shared
+                    .lock()
+                    .expect("tui lock")
+                    .seed_estimate_usage(after_tokens);
             }
+            say_compaction(
+                tui,
+                &crate::composer::fmt_elapsed_compact(elapsed.as_secs()),
+                tokens,
+                after_tokens,
+                before_msgs,
+                after_msgs,
+                window,
+            );
             ensure_session_state(session_state, config, cwd).await;
             if let Some(state) = session_state {
                 // Boundary marker + replacement: reload replays the active
@@ -569,7 +576,7 @@ pub(crate) async fn maybe_threshold_compact(
                     .append_compaction_replacement(&state.session_id, agent.messages())
                     .await;
             }
-            *initial_count = agent.messages().len();
+            *initial_count = after_msgs;
         }
         Ok(false) => {
             // Nothing gained: drop the status silently, no transcript line
@@ -607,7 +614,11 @@ pub(crate) async fn maybe_overflow_compact(
     }
     // Codex parity: no pre-message — the `Compacting context` status dock is
     // the ongoing signal (it survives follow-up input/retries). The single
-    // transcript line lands on completion below.
+    // transcript card lands on completion below (same shape as the threshold
+    // and manual paths).
+    let window = crate::setup::resolve_model_context_length(config.model.as_deref().unwrap_or(""));
+    let before_tokens = crate::compact::estimate_context_tokens(agent.messages(), None);
+    let before_msgs = agent.messages().len();
     let compaction_id = format!("overflow-{}", uuid::Uuid::new_v4().as_simple());
     if let Some(shared) = tui {
         shared
@@ -625,18 +636,24 @@ pub(crate) async fn maybe_overflow_compact(
                         .finish_compaction(&compaction_id, Some("Working"))
                 })
                 .unwrap_or_default();
-            say(
-                tui,
-                &format!(
-                    "context overflow — Context compacted · {}",
-                    crate::composer::fmt_elapsed_compact(elapsed.as_secs())
-                ),
-            );
+            let after_tokens = crate::compact::estimate_context_tokens(agent.messages(), None);
+            let after_msgs = agent.messages().len();
             // See threshold path: reseed the gauge to the compacted size.
             if let Some(shared) = tui {
-                let est = crate::compact::estimate_context_tokens(agent.messages(), None);
-                shared.lock().expect("tui lock").seed_estimate_usage(est);
+                shared
+                    .lock()
+                    .expect("tui lock")
+                    .seed_estimate_usage(after_tokens);
             }
+            say_compaction(
+                tui,
+                &crate::composer::fmt_elapsed_compact(elapsed.as_secs()),
+                before_tokens,
+                after_tokens,
+                before_msgs,
+                after_msgs,
+                window,
+            );
             ensure_session_state(session_state, config, cwd).await;
             if let Some(state) = session_state {
                 // Boundary marker + replacement (see threshold path).
@@ -645,7 +662,7 @@ pub(crate) async fn maybe_overflow_compact(
                     .append_compaction_replacement(&state.session_id, agent.messages())
                     .await;
             }
-            *initial_count = agent.messages().len();
+            *initial_count = after_msgs;
             true
         }
         Ok(false) => {

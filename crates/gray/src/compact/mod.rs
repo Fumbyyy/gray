@@ -14,9 +14,9 @@ use gray_core::message::Message;
 pub mod policy;
 
 pub use policy::{
-    CompactionSettings, compaction_settings_for, estimate_context_tokens, estimate_tokens,
-    init_auto_compact_from_env, is_auto_compact_enabled, is_context_overflow_error,
-    set_auto_compact_enabled, should_compact,
+    CompactionSettings, compaction_card_lines, compaction_settings_for, estimate_context_tokens,
+    estimate_tokens, init_auto_compact_from_env, is_auto_compact_enabled,
+    is_context_overflow_error, set_auto_compact_enabled, should_compact,
 };
 
 pub async fn auto_compact_if_needed(agent: &mut Agent) -> Result<bool, CoreError> {
@@ -171,6 +171,23 @@ mod tests {
     fn estimate_falls_back_to_chars() {
         let msgs = vec![Message::user("a".repeat(400))]; // 100 tokens
         assert_eq!(estimate_context_tokens(&msgs, None), 100);
+    }
+
+    #[test]
+    fn compaction_card_reports_before_after_and_saved() {
+        let (tok, msg) = compaction_card_lines(193_800, 7_400, 142, 9, 200_000);
+        // `saved` renders through the shared `format_context_length`
+        // formatter (186_400 lands on its near-integer-KiBi branch as
+        // `182k`) — same rendering `/context` and the footer use.
+        assert_eq!(tok, "193.8k → 7.4k tokens · saved 182k (96%)");
+        assert_eq!(msg, "142 → 9 messages · now 4% of 200k window");
+    }
+
+    #[test]
+    fn compaction_card_handles_empty_history_without_dividing_by_zero() {
+        let (tok, msg) = compaction_card_lines(0, 0, 0, 0, 0);
+        assert_eq!(tok, "0 → 0 tokens · saved 0 (0%)");
+        assert_eq!(msg, "0 → 0 messages · now 0% of 0 window");
     }
 
     /// A message holding one capped tool result (`truncate.rs` allows 50 KiB)
