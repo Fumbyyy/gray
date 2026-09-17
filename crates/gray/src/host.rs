@@ -13,6 +13,34 @@ use std::sync::Mutex;
 
 use gray_plugin::{HOST_RUN, HOST_SAY, HostHandler};
 
+// Weak: the host must not keep an exited composer alive.
+static TUI: Mutex<std::sync::Weak<std::sync::Mutex<crate::composer::Tui>>> =
+    Mutex::new(std::sync::Weak::new());
+
+pub(crate) fn register_tui(tui: &crate::composer::SharedTui) {
+    *TUI.lock().expect("background registration") = std::sync::Arc::downgrade(tui);
+}
+
+fn background(params: serde_json::Value) -> anyhow::Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        path: Option<PathBuf>,
+    }
+    anyhow::ensure!(
+        params.get("path").is_some(),
+        "missing background path (null clears)"
+    );
+    let request: Request = serde_json::from_value(params)?;
+    let tui = TUI
+        .lock()
+        .map_err(|_| anyhow::anyhow!("TUI unavailable"))?
+        .upgrade()
+        .ok_or_else(|| anyhow::anyhow!("background requires an interactive Gray TUI"))?;
+    let mut tui = tui.lock().map_err(|_| anyhow::anyhow!("TUI unavailable"))?;
+    tui.set_background(request.path.as_deref())
+}
+
 static SAY_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Drain queued `host/say` lines (the REPL loop and print mode own rendering).
@@ -37,6 +65,10 @@ pub fn default_handler(cwd: PathBuf) -> HostHandler {
         let fut: std::pin::Pin<Box<dyn std::future::Future<Output = serde_json::Value> + Send>> =
             Box::pin(async move {
                 match method.as_str() {
+                    "host/background" => match background(params) {
+                        Ok(()) => serde_json::json!({"ok": true}),
+                        Err(e) => serde_json::json!({"error": format!("{e:#}")}),
+                    },
                     HOST_SAY => {
                         if let Some(text) = params.get("text").and_then(|t| t.as_str())
                             && !text.trim().is_empty()
@@ -61,4 +93,29 @@ pub fn default_handler(cwd: PathBuf) -> HostHandler {
             });
         fut
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn background_rejects_headless_and_malformed_requests() {
+        let handler = default_handler(PathBuf::from("/tmp"));
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"path": 42}),
+            serde_json::json!({"path": null, "raw_escape": "bad"}),
+        ] {
+            let reply = handler("host/background".into(), params).await;
+            assert!(reply.get("error").is_some(), "{reply}");
+        }
+        let reply = handler("host/background".into(), serde_json::json!({"path": null})).await;
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("interactive Gray TUI")
+        );
+    }
 }

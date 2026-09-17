@@ -12,7 +12,9 @@ pub mod gateway;
 pub mod host;
 pub mod logging;
 pub mod plugin_check;
+pub mod plugin_cli;
 pub mod print;
+mod print_meter;
 pub mod profile;
 pub mod repl;
 pub mod resume;
@@ -226,6 +228,20 @@ pub struct Cli {
     #[arg(short = 'p', long = "print")]
     pub print: Option<String>,
 
+    /// Emit versioned NDJSON progress and a final result instead of terminal output
+    #[arg(long, requires = "print")]
+    pub json: bool,
+
+    /// Maximum provider requests in a JSON print invocation (includes compaction)
+    #[arg(long, requires = "json", value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_requests: Option<u32>,
+    /// Conservative model input USD per million tokens for budget accounting
+    #[arg(long, requires = "json")]
+    pub input_price: Option<f64>,
+    /// Conservative model output USD per million tokens for budget accounting
+    #[arg(long, requires = "json")]
+    pub output_price: Option<f64>,
+
     /// API key for authentication (overrides GRAY_API_KEY and OPENAI_API_KEY)
     #[arg(long)]
     pub api_key: Option<String>,
@@ -316,6 +332,25 @@ pub enum Commands {
     Sessions {
         #[command(subcommand)]
         cmd: SessionsCmd,
+    },
+    /// Install a plugin from the bundled catalog (e.g. `gray install plugin discord`)
+    Install {
+        #[command(subcommand)]
+        cmd: InstallCmd,
+    },
+    /// Plugin-provided commands (`gray discord setup`, …) — forwarded to the plugin
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+/// `gray install plugin <name>` — plugin catalog installer.
+#[derive(Parser, Debug, Clone)]
+pub enum InstallCmd {
+    /// Install a plugin command by catalog name
+    Plugin {
+        /// Catalog name (e.g. discord)
+        #[arg(value_name = "NAME")]
+        name: String,
     },
 }
 
