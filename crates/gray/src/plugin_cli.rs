@@ -262,6 +262,29 @@ pub async fn install_spec(home: &Path, spec: &str, force: bool, yes: bool) -> an
     Ok(())
 }
 
+/// Install several specs in one call — `gray plugin install memory search mcp`.
+/// One bad spec does not abort the rest; failures print inline and the command
+/// exits non-zero with the list.
+pub async fn install_specs(
+    home: &Path,
+    specs: &[String],
+    force: bool,
+    yes: bool,
+) -> anyhow::Result<()> {
+    let mut failed = Vec::new();
+    for spec in specs {
+        if let Err(e) = install_spec(home, spec, force, yes).await {
+            eprintln!("{spec}: {e:#}");
+            failed.push(spec.as_str());
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{} install(s) failed: {}", failed.len(), failed.join(", "))
+    }
+}
+
 fn scan_or_block(root: &Path, force: bool, gate: TrustGate) -> anyhow::Result<Vec<String>> {
     use gray_plugin::scan::{Verdict, scan_tree};
     let report = scan_tree(root)?;
@@ -653,6 +676,34 @@ fn removed_builtin(name: &str) -> Option<&'static str> {
     }
 }
 
+async fn index_owner_hint(name: &str) -> Option<String> {
+    if crate::config::offline() {
+        return None;
+    }
+    let client = gray_pkg::fetch::client().ok()?;
+    let index = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        gray_pkg::index::fetch_index(&client),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    index
+        .plugins
+        .iter()
+        .find(|(_, e)| {
+            e.trusted()
+                && e.commands
+                    .iter()
+                    .any(|c| c.trim_start_matches('/') == name)
+        })
+        .map(|(owner, _)| {
+            format!(
+                "'{name}' is provided by the {owner} plugin — install it with: gray plugin install {owner}"
+            )
+        })
+}
+
 fn owners_for_command(
     home: &Path,
     name: &str,
@@ -719,7 +770,7 @@ fn user_home_lock(home: &Path) -> Option<(PathBuf, LockFile)> {
     load_lock(&user).ok().map(|lock| (user, lock))
 }
 
-pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
+pub async fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     validate_name(name)?;
     migrate_commands_json(home);
     let lock = load_lock(home)?;
@@ -769,13 +820,16 @@ pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
                     return Err(anyhow::anyhow!(if sidecar_named {
                         format!("'{name}' is a sidecar plugin, not a CLI command")
                     } else {
-                        removed_builtin(name)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| {
-                                format!(
-                                    "no plugin command '{name}' — install it with: gray plugin install {name}"
-                                )
-                            })
+                        match index_owner_hint(name).await {
+                            Some(hint) => hint,
+                            None => removed_builtin(name)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "no plugin command '{name}' — install it with: gray plugin install {name}"
+                                    )
+                                }),
+                        }
                     }));
                 }
             }
@@ -1075,7 +1129,10 @@ pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option
         })
     };
     let Some((entry_home, entry_name, entry, prepend)) = selected else {
-        return Ok(removed_builtin(name).map(str::to_string));
+        return Ok(match index_owner_hint(name).await {
+            Some(hint) => Some(hint),
+            None => removed_builtin(name).map(str::to_string),
+        });
     };
     if !enabled(&entry_home, &entry_name, &entry) {
         anyhow::bail!(
