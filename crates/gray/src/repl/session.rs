@@ -187,7 +187,15 @@ pub(crate) async fn handle_resume(
         }
         return;
     } else {
-        let result = with_modal(tui, crate::resume::run_resume_picker(args.all, bg.as_ref())).await;
+        let result = with_modal(
+            tui,
+            crate::resume::run_resume_picker(
+                args.all,
+                bg.as_ref(),
+                session_state.as_ref().map(|s| s.session_id.clone()),
+            ),
+        )
+        .await;
         match result {
             Ok(Some(id)) => Some(id),
             Ok(None) => {
