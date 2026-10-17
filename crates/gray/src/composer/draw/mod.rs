@@ -202,7 +202,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         model: Some(home_model_name.as_str()),
         model_tail: (!home_model_tail.is_empty()).then_some(home_model_tail.as_str()),
         above: tui.home_update.as_deref(),
-        qol: tui.home_qol.as_deref(),
+        quality_of_life: tui.home_quality_of_life.as_deref(),
         session: tui.home_session.as_deref(),
     });
     let home_mode = home.is_some();

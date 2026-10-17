@@ -218,7 +218,7 @@ async fn run() -> anyhow::Result<()> {
                     return gray::auto_update::auto_cli(v);
                 }
                 if everything {
-                    return gray::qol::update::cli().await;
+                    return gray::quality_of_life::update::cli().await;
                 }
                 return gray::update::update_now().await;
             }

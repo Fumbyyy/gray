@@ -274,7 +274,7 @@ pub(crate) async fn run_for_home(tui: crate::composer::SharedTui) {
     let _ = super::save_state(&state);
     if let Ok(mut t) = tui.lock() {
         if t.is_home() {
-            t.set_home_qol(Some(line));
+            t.set_home_quality_of_life(Some(line));
         } else {
             t.push_dim(line);
             t.ensure_gap();

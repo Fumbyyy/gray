@@ -393,7 +393,7 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
         ReplCommand::Setup(arg) => {
-            crate::qol::setup::handle(tui, arg).await;
+            crate::quality_of_life::setup::handle(tui, arg).await;
             Flow::Continue
         }
         ReplCommand::Intro(arg) => {

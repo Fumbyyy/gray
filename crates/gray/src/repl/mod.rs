@@ -906,7 +906,7 @@ pub async fn run_repl_mode(
         && !config.bare
         && let Some((shared, _)) = &tui
     {
-        tokio::spawn(crate::qol::detect::run_for_home(shared.clone()));
+        tokio::spawn(crate::quality_of_life::detect::run_for_home(shared.clone()));
     }
 
     if interactive
@@ -1002,8 +1002,8 @@ pub async fn run_repl_mode(
         jobs::spawn_footer_poller();
     }
 
-    if interactive && tui.is_some() && crate::qol::detect::take_pending_setup() {
-        crate::qol::setup::handle(&tui, None).await;
+    if interactive && tui.is_some() && crate::quality_of_life::detect::take_pending_setup() {
+        crate::quality_of_life::setup::handle(&tui, None).await;
     }
 
     loop {

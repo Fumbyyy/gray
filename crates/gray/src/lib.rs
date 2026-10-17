@@ -30,7 +30,7 @@ pub mod profile;
 pub mod project_trust;
 pub mod prompt_templates;
 pub mod providers;
-pub mod qol;
+pub mod quality_of_life;
 pub mod repl;
 pub mod resume;
 mod rotation;
