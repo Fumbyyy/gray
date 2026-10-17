@@ -172,7 +172,7 @@ async fn install_spec_gated(
         && let Some(paths) = std::env::var_os("PATH")
     {
         for dir in std::env::split_paths(&paths) {
-            for stem in [format!("gray-{spec}"), format!("{spec}")] {
+            for stem in [format!("gray-{spec}"), spec.to_string()] {
                 let candidate = dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
                 if candidate.is_file() {
                     return register_native_gated(home, Some(spec), &candidate, force, gate).await;
