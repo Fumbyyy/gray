@@ -46,9 +46,9 @@ pub(crate) fn print_exit_hint(session_state: &Option<SessionState>) {
         && claim_exit_hint()
     {
         use std::io::IsTerminal as _;
-        println!(
-            "{}",
-            exit_hint_line(state.session_id.as_str(), std::io::stdout().is_terminal())
+        say(
+            None,
+            &exit_hint_line(state.session_id.as_str(), std::io::stdout().is_terminal()),
         );
         let _ = std::io::stdout().flush();
     }
@@ -87,7 +87,7 @@ pub(crate) async fn handle_resume(
                 .expect("tui lock")
                 .push_dim(format!("\u{2514} {msg}"));
         } else {
-            println!("{msg}");
+            say(None, &msg);
         }
         return;
     }
@@ -134,7 +134,7 @@ pub(crate) async fn handle_resume(
                                 true,
                             );
                         } else {
-                            println!("{msg}");
+                            say(None, &msg);
                         }
                         return;
                     }
@@ -167,7 +167,7 @@ pub(crate) async fn handle_resume(
                         false,
                     );
                 } else {
-                    println!("{msg}");
+                    say(None, msg);
                 }
                 return;
             }
@@ -179,10 +179,13 @@ pub(crate) async fn handle_resume(
         let store = JsonlSessionStore::new(root);
         let summaries = crate::resume::recent_summaries(&store, args.all).await;
         if summaries.is_empty() {
-            println!("no saved sessions in this directory (try /sessions --all or --all)");
+            say(
+                None,
+                "no saved sessions in this directory (try /sessions --all or --all)",
+            );
         } else {
             for s in &summaries {
-                println!("{}", crate::resume::format_summary_row(s));
+                say(None, &crate::resume::format_summary_row(s));
             }
         }
         return;
@@ -205,7 +208,7 @@ pub(crate) async fn handle_resume(
                         true,
                     );
                 } else {
-                    println!("resume picker error: {e}");
+                    say(None, &format!("resume picker error: {e}"));
                 }
                 return;
             }
@@ -302,7 +305,8 @@ pub(crate) async fn handle_resume(
                                 previews: Some(&tool_previews),
                             },
                             vec![format!(
-                                "\u{2b22} Resumed session {} ({n} messages)",
+                                "{} Resumed session {} ({n} messages)",
+                                crate::tui::glyph("\u{2b22}", "#"),
                                 sid.as_str()
                             )],
                         );
@@ -323,9 +327,13 @@ pub(crate) async fn handle_resume(
                         t.ensure_gap();
                         let _ = t.draw();
                     } else {
-                        println!(
-                            "\x1b[2m\u{2b22} Resumed session {} ({n} messages)\x1b[0m",
-                            sid.as_str()
+                        say(
+                            None,
+                            &format!(
+                                "\x1b[2m{} Resumed session {} ({n} messages)\x1b[0m",
+                                crate::tui::glyph("\u{2b22}", "#"),
+                                sid.as_str()
+                            ),
                         );
                     }
                 }
@@ -339,7 +347,7 @@ pub(crate) async fn handle_resume(
                             true,
                         );
                     } else {
-                        println!("{msg}");
+                        say(None, &msg);
                     }
                 }
             }
@@ -354,7 +362,7 @@ pub(crate) async fn handle_resume(
                     true,
                 );
             } else {
-                println!("{msg}");
+                say(None, &msg);
             }
         }
     }
@@ -747,6 +755,17 @@ pub(crate) fn dispatch_agent_event(
         return;
     }
     if !interactive {
+        if crate::ide::tap_active() {
+            if let AgentEvent::TurnEnd { usage, .. } = ev {
+                *turn_usage = Some(*usage);
+                let ms = elapsed_ms();
+                *turn_duration_ms = Some(ms);
+                if usage.total() > 0 {
+                    totals.add(usage, model, Some(ms));
+                }
+            }
+            return;
+        }
         match ev {
             AgentEvent::TextDelta { delta } => {
                 print!("{delta}");

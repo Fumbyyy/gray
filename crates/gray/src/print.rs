@@ -178,7 +178,8 @@ pub fn render_event_with_context<W: Write>(
             if usage.total() > 0 {
                 writeln!(
                     w,
-                    "\n\x1b[2m\u{2b22} {} tok\x1b[0m",
+                    "\n\x1b[2m{} {} tok\x1b[0m",
+                    crate::tui::glyph("\u{2b22}", "#"),
                     crate::repl::fmt_usage(usage.total())
                 )?;
             }

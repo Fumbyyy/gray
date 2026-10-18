@@ -417,7 +417,8 @@ pub async fn resumed_session_line(
         .await
         .map_err(|e| anyhow::anyhow!("could not resume session {}: {e}", id.as_str()))?;
     Ok(format!(
-        "\u{2b22} Resumed session {} ({} messages)",
+        "{} Resumed session {} ({} messages)",
+        crate::tui::glyph("\u{2b22}", "#"),
         id.as_str(),
         entries.len()
     ))
@@ -428,7 +429,7 @@ pub fn locked_session_card(id: &SessionId, pid: Option<u32>) -> String {
     let notice = crate::session_store::SessionError::locked_notice(id, pid);
     let mut lines = notice.lines();
     let head = lines.next().unwrap_or_default();
-    let mut out = format!("\u{2b22} {head}");
+    let mut out = format!("{} {head}", crate::tui::glyph("\u{2b22}", "#"));
     let dim = std::io::stderr().is_terminal();
     for line in lines {
         if dim {

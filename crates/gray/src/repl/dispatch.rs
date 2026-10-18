@@ -129,8 +129,8 @@ pub(crate) async fn dispatch_command(
                 t.push_dim(out.trim_end().to_string());
                 t.ensure_gap();
             } else {
-                println!("{}", crate::rule("commands"));
-                print!("{out}");
+                say(None, &crate::rule("commands"));
+                say(None, out.trim_end());
             }
             Flow::Continue
         }
@@ -230,9 +230,9 @@ pub(crate) async fn dispatch_command(
                 t.ensure_gap();
             } else {
                 if !short_id.is_empty() {
-                    println!("✓ New conversation started ({short_id})");
+                    say(None, &format!("✓ New conversation started ({short_id})"));
                 } else {
-                    println!("✓ New conversation started");
+                    say(None, "✓ New conversation started");
                 }
             }
 
@@ -244,7 +244,10 @@ pub(crate) async fn dispatch_command(
                         !prompt_text.starts_with('/'),
                     );
                 } else {
-                    println!("❯ {prompt_text}");
+                    say(
+                        None,
+                        &format!("{} {prompt_text}", crate::tui::arrow_glyph()),
+                    );
                 }
                 *pending_command = Some(ReplCommand::Prompt(prompt_text));
             }
@@ -496,7 +499,7 @@ pub(crate) async fn dispatch_command(
                             true,
                         );
                     } else {
-                        println!("provider error: {e}");
+                        say(None, &format!("provider error: {e}"));
                     }
                 }
             }
@@ -609,7 +612,8 @@ pub(crate) async fn dispatch_command(
                                     say(
                                         tui.as_ref().map(|(s, _)| s),
                                         &format!(
-                                            "⬢ inside {name} — prompts continue this agent's session"
+                                            "{} inside {name} — prompts continue this agent's session",
+                                            crate::tui::glyph("\u{2b22}", "#")
                                         ),
                                     );
                                 }

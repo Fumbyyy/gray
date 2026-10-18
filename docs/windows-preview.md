@@ -1,6 +1,6 @@
 # Native Windows installation
 
-Windows 11 x64 installs natively: no WSL, no Linux distro, no elevation. Git for
+Windows 10 and 11 x64 install natively: no WSL, no Linux distro, no elevation. Git for
 Windows supplies the shell for tool calls; Gray does not install it or WSL. The
 installer's default route is native — `-Wsl` is the explicit compatibility
 route that installs the Linux build inside WSL.
@@ -12,7 +12,7 @@ material in `%USERPROFILE%\.gray`.
 
 ## Install
 
-On Windows 11 x64, in PowerShell (5.1 or 7):
+On Windows 10 or 11 x64, in PowerShell (5.1 or 7):
 
 ```powershell
 irm https://gray.alignment.id/install.ps1 | iex

@@ -146,7 +146,7 @@ fn idle_ctx(cwd: &Path, sid: &str) -> gray_core::agent::ToolContext {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum WakeCard {
+pub(crate) enum WakeCard {
     Cron(crate::cron_serve::CronCard),
 
     Job(JobCard),
@@ -155,7 +155,7 @@ pub(super) enum WakeCard {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct JobCard {
+pub(crate) struct JobCard {
     pub id: String,
 
     pub outcome: String,
@@ -192,7 +192,7 @@ pub(super) fn card_header_spans(
     };
     vec![
         Span::styled(
-            "\u{2b22} ",
+            format!("{} ", crate::tui::glyph("\u{2b22}", "#")),
             Style::default().fg(bullet).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -317,7 +317,7 @@ pub(super) fn cron_card_lines(
     (header, body)
 }
 
-pub(super) fn idle_wake(
+pub(crate) fn idle_wake(
     agent: Option<&gray_core::agent::Agent>,
     sid: Option<&str>,
     cwd: &Path,

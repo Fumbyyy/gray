@@ -208,7 +208,7 @@ pub(crate) fn build_input_box(
     box_lines.push(Line::from(""));
 
     let arrow_span = Span::styled(
-        " ❯ ",
+        format!(" {} ", crate::tui::arrow_glyph()),
         Style::default()
             .fg(prompt_color)
             .add_modifier(Modifier::BOLD),

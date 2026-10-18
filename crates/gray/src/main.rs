@@ -162,6 +162,12 @@ async fn run() -> anyhow::Result<()> {
         return gray::plugin_cli::forward(&gray::plugin_cli::home()?, "gateway", args).await;
     }
 
+    if let Some(gray::Commands::Install {
+        cmd: gray::InstallCmd::Plugin { name },
+    }) = &cli.command
+    {
+        return gray::plugin_cli::install(&gray::plugin_cli::home()?, name).await;
+    }
     if let Some(gray::Commands::External(args)) = &cli.command {
         let (name, rest) = args
             .split_first()
@@ -241,7 +247,7 @@ async fn run() -> anyhow::Result<()> {
                 return gray::cmd::run_cli(cmd, &mut config).await;
             }
 
-            gray::Commands::External(_) => {
+            gray::Commands::External(_) | gray::Commands::Install { .. } => {
                 unreachable!("plugin CLI dispatch happens before configuration")
             }
             gray::Commands::Gateway { .. } => {

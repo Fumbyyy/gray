@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -29,19 +30,34 @@ fn migrate_commands_json(home: &Path) {
     }
 }
 
+/// Reconciles the live `plugins/commands.json` CLI registry with the plugin
+/// lock. A row folds into the lock only once an entry of the same name
+/// exists — plugins write that entry themselves when their `setup` command
+/// registers a sidecar argv (gray-discord's register() refuses to overwrite
+/// a foreign argv, and the builder would spawn any non-empty `argv` as a
+/// sidecar). Rows with no lock counterpart stay in commands.json, which is
+/// still the registry `forward` reads for `gray <name>` dispatch.
 fn migrate_commands(home: &Path, commands: &Path) -> anyhow::Result<()> {
     let _guard = gray_pkg::ops::hold_registry_lock_in(&home.join("plugins"))?;
     let old = LockFile::load(commands)?;
     let path = gray_plugin::lock::lock_path(home);
     let mut lock = LockFile::load(&path)?;
-    merge_command_entries(&mut lock, old);
+    let remaining = merge_command_entries(&mut lock, old);
     lock.save(&path)?;
-    std::fs::rename(commands, commands.with_file_name("commands.json.migrated"))?;
+    if remaining.plugins.is_empty() {
+        std::fs::rename(commands, commands.with_file_name("commands.json.migrated"))?;
+    } else {
+        remaining.save(commands)?;
+    }
     Ok(())
 }
 
-fn merge_command_entries(lock: &mut LockFile, old: LockFile) {
-    for (name, mut entry) in old.plugins {
+fn merge_command_entries(lock: &mut LockFile, old: LockFile) -> LockFile {
+    let mut remaining = LockFile {
+        schema: 1,
+        plugins: std::collections::BTreeMap::new(),
+    };
+    for (name, entry) in old.plugins {
         match lock.plugins.get_mut(&name) {
             Some(cur) => {
                 if cur.cli_argv.is_none() {
@@ -49,11 +65,11 @@ fn merge_command_entries(lock: &mut LockFile, old: LockFile) {
                 }
             }
             None => {
-                entry.cli_argv = Some(entry.argv.clone());
-                lock.plugins.insert(name, entry);
+                remaining.plugins.insert(name, entry);
             }
         }
     }
+    remaining
 }
 
 fn validate_name(name: &str) -> anyhow::Result<()> {
@@ -122,12 +138,22 @@ enum TrustGate {
 
 async fn index_entry(name: &str) -> Option<gray_pkg::index::Entry> {
     let client = gray_pkg::fetch::client().ok()?;
-    if let Ok(index) = gray_pkg::index::fetch_hub_index(&client).await
+    if let Ok(Ok(index)) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        gray_pkg::index::fetch_hub_index(&client),
+    )
+    .await
         && let Ok(entry) = gray_pkg::index::lookup(&index, name)
     {
         return Some(entry.clone());
     }
-    let index = gray_pkg::index::fetch_index(&client).await.ok()?;
+    let index = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        gray_pkg::index::fetch_index(&client),
+    )
+    .await
+    .ok()?
+    .ok()?;
     gray_pkg::index::lookup(&index, name).ok().cloned()
 }
 
@@ -262,6 +288,212 @@ pub async fn install_spec(home: &Path, spec: &str, force: bool, yes: bool) -> an
     Ok(())
 }
 
+const CATALOG: &[(&str, &str, &str)] = &[(
+    "discord",
+    "git+https://github.com/vstaln/gray-discord-plugin.git@b149022a1ca7c9e099007ffd8411c14489d8db93",
+    "gray_discord",
+)];
+
+fn catalog_names() -> String {
+    std::iter::once("background")
+        .chain(CATALOG.iter().map(|(name, _, _)| *name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn commands_path(home: &Path) -> PathBuf {
+    home.join("plugins/commands.json")
+}
+
+fn commands_or_empty(home: &Path) -> LockFile {
+    load_commands(home).unwrap_or_else(|_| LockFile {
+        schema: 1,
+        plugins: std::collections::BTreeMap::new(),
+    })
+}
+
+fn load_commands(home: &Path) -> anyhow::Result<LockFile> {
+    let registry = LockFile::load(&commands_path(home))?;
+    anyhow::ensure!(
+        registry.schema == 1,
+        "unsupported plugin command registry schema"
+    );
+    Ok(registry)
+}
+
+fn cli_registered(home: &Path, name: &str) -> bool {
+    load_commands(home)
+        .map(|registry| registry.plugins.contains_key(name))
+        .unwrap_or(false)
+        || load_lock(home)
+            .map(|lock| {
+                lock.plugins
+                    .get(name)
+                    .is_some_and(|entry| entry.cli_argv.is_some())
+            })
+            .unwrap_or(false)
+}
+
+/// A commands.json row resolves `gray <name>` forwarding: its `argv` is the
+/// plugin's CLI argv. These rows are the live registry — unlike lock
+/// entries, their `argv` is never spawned as a sidecar, so no lock entry is
+/// created until the plugin writes one itself (e.g. `gray discord setup`).
+fn commands_cli_entry(registry: &LockFile, name: &str, global_only: bool) -> Option<LockEntry> {
+    registry
+        .plugins
+        .get(name)
+        .filter(|e| !global_only || e.global)
+        .map(|e| {
+            let mut e = e.clone();
+            e.cli_argv = Some(e.argv.clone());
+            e
+        })
+}
+
+fn run_installer(program: impl AsRef<OsStr>, args: &[&OsStr]) -> anyhow::Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .env("PIP_NO_INPUT", "1")
+        .status()
+        .context("could not start plugin installer; check Python and python3-venv")?;
+    anyhow::ensure!(
+        status.success(),
+        "plugin installation step failed ({status}); see output above"
+    );
+    Ok(())
+}
+
+async fn install_catalog(home: &Path, name: &str) -> anyhow::Result<()> {
+    let (_, source, module) = CATALOG
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .with_context(|| format!("Unknown plugin '{name}'. Available: {}", catalog_names()))?;
+    if cli_registered(home, name) {
+        println!("Plugin '{name}' is already registered. Run: gray {name} --help");
+        return Ok(());
+    }
+    let root = home.join("plugins/cli");
+    std::fs::create_dir_all(&root)?;
+    let env = tempfile::Builder::new()
+        .prefix(&format!("{name}-"))
+        .tempdir_in(&root)?;
+    let python = match std::env::var_os("GRAY_PLUGIN_PYTHON") {
+        Some(python) => python,
+        None => ["python3", "python", "/usr/bin/python3"]
+            .into_iter()
+            .find(|python| {
+                Command::new(python)
+                    .args(["-c", "import sys, venv, ensurepip, ctypes; assert sys.version_info >= (3, 11)"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success())
+            })
+            .map(std::ffi::OsString::from)
+            .context("Python 3.11+ with venv/pip support is required; install python3-venv or set GRAY_PLUGIN_PYTHON")?,
+    };
+    println!("Installing '{name}' from {source} (plugin code runs with your user permissions).");
+    run_installer(
+        &python,
+        &[OsStr::new("-m"), OsStr::new("venv"), env.path().as_os_str()],
+    )?;
+    let executable = env.path().join(if cfg!(windows) {
+        "Scripts/python.exe"
+    } else {
+        "bin/python"
+    });
+    run_installer(
+        executable.as_os_str(),
+        &[
+            OsStr::new("-m"),
+            OsStr::new("pip"),
+            OsStr::new("install"),
+            OsStr::new(source),
+        ],
+    )?;
+    run_installer(
+        executable.as_os_str(),
+        &[OsStr::new("-m"), OsStr::new(module), OsStr::new("--help")],
+    )?;
+    let plugins = home.join("plugins");
+    std::fs::create_dir_all(&plugins)?;
+    {
+        let _guard = gray_pkg::ops::hold_registry_lock_in(&plugins)?;
+        if cli_registered(home, name) {
+            println!("Plugin '{name}' is already registered. Run: gray {name} --help");
+            return Ok(());
+        }
+        let mut registry = load_commands(home)?;
+        registry.plugins.insert(
+            name.into(),
+            LockEntry {
+                ecosystem: "gray-cli".into(),
+                version: "catalog".into(),
+                hash: String::new(),
+                source: source.to_string(),
+                argv: vec![
+                    executable.to_string_lossy().into_owned(),
+                    "-m".into(),
+                    module.to_string(),
+                ],
+                adapter_version: "1".into(),
+                installed_at: chrono::Utc::now().to_rfc3339(),
+                scope: "user".into(),
+                enabled: true,
+                granted_capabilities: Vec::new(),
+                capabilities_hash: None,
+                runtime_role: None,
+                cli_argv: None,
+                global: false,
+            },
+        );
+        registry.save(&commands_path(home))?;
+    }
+    let _ = env.keep();
+    println!("Installed '{name}'. Next: gray {name} setup");
+    Ok(())
+}
+
+pub async fn install(home: &Path, name: &str) -> anyhow::Result<()> {
+    validate_name(name)?;
+    if let Some(path) = std::env::var_os("GRAY_PLUGIN_PATH") {
+        let line = register_native(home, Some(name), Path::new(&path), false).await?;
+        if !line.is_empty() {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    if name == "background" {
+        install_spec(home, name, false, false).await?;
+        return Ok(());
+    }
+    if CATALOG.iter().any(|(n, _, _)| *n == name) {
+        return install_catalog(home, name).await;
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            for stem in [format!("gray-{name}"), name.to_string()] {
+                let candidate = dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
+                if candidate.is_file() {
+                    let line = register_native(home, Some(name), &candidate, false).await?;
+                    if !line.is_empty() {
+                        println!("{line}");
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
+    if index_entry(name).await.is_some() {
+        install_spec(home, name, false, false).await?;
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Unknown plugin '{name}'. Catalog: {}. For a local native plugin, put gray-{name} on PATH or set GRAY_PLUGIN_PATH to its executable",
+        catalog_names()
+    )
+}
+
 /// Install several specs in one call — `gray plugin install memory search mcp`.
 /// One bad spec does not abort the rest; failures print inline and the command
 /// exits non-zero with the list.
@@ -294,7 +526,7 @@ fn scan_or_block(root: &Path, force: bool, gate: TrustGate) -> anyhow::Result<Ve
         if to_lines {
             out.push(s);
         } else {
-            println!("{s}");
+            crate::repl::say(None, &s);
         }
     };
     match report.verdict() {
@@ -321,7 +553,7 @@ fn scan_or_block(root: &Path, force: bool, gate: TrustGate) -> anyhow::Result<Ve
                 return Ok(out);
             }
             note(format!("  plugin scan: caution — {}", report.summary()));
-            print!("{}", report.render());
+            crate::repl::say(None, report.render().trim_end());
             if force {
                 note("  continuing (--force)".to_string());
                 return Ok(out);
@@ -343,7 +575,7 @@ fn scan_or_block(root: &Path, force: bool, gate: TrustGate) -> anyhow::Result<Ve
                 .map(|f| format!("{} ({}:{})", f.rule, f.path, f.line))
                 .collect();
             if !to_lines {
-                print!("{}", report.render());
+                crate::repl::say(None, report.render().trim_end());
             }
             anyhow::bail!(
                 "plugin scan blocked the install: {} critical of {} findings ({}); \
@@ -547,14 +779,27 @@ pub struct ManagedPlugin {
 pub fn list_managed(home: &Path) -> anyhow::Result<Vec<ManagedPlugin>> {
     migrate_commands_json(home);
     let lock = load_lock(home)?;
-    Ok(lock
+    let mut rows: Vec<ManagedPlugin> = lock
         .plugins
-        .into_iter()
-        .map(|(name, entry)| {
-            let cli = entry.cli_argv.is_some();
-            ManagedPlugin { name, entry, cli }
+        .iter()
+        .map(|(name, entry)| ManagedPlugin {
+            name: name.clone(),
+            entry: entry.clone(),
+            cli: entry.cli_argv.is_some(),
         })
-        .collect())
+        .collect();
+    if let Ok(commands) = load_commands(home) {
+        for (name, entry) in commands.plugins {
+            if !lock.plugins.contains_key(&name) {
+                rows.push(ManagedPlugin {
+                    name,
+                    entry,
+                    cli: true,
+                });
+            }
+        }
+    }
+    Ok(rows)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,11 +842,62 @@ pub fn list_rows() -> anyhow::Result<Vec<ManagedRow>> {
         .collect())
 }
 
+fn update_commands_entry(
+    home: &Path,
+    name: &str,
+    f: impl FnOnce(&mut LockEntry),
+) -> anyhow::Result<()> {
+    let _guard = gray_pkg::ops::hold_registry_lock_in(&home.join("plugins"))?;
+    let path = commands_path(home);
+    let mut registry = LockFile::load(&path)?;
+    let Some(entry) = registry.plugins.get_mut(name) else {
+        anyhow::bail!("not installed: {name}");
+    };
+    f(entry);
+    registry.save(&path)?;
+    Ok(())
+}
+
+fn remove_commands_entry(home: &Path, name: &str) -> anyhow::Result<bool> {
+    let _guard = gray_pkg::ops::hold_registry_lock_in(&home.join("plugins"))?;
+    let path = commands_path(home);
+    let mut registry = LockFile::load(&path)?;
+    let removed = registry.plugins.remove(name).is_some();
+    if removed {
+        registry.save(&path)?;
+    }
+    Ok(removed)
+}
+
+fn commands_only(home: &Path, name: &str) -> bool {
+    load_commands(home).is_ok_and(|r| r.plugins.contains_key(name))
+        && load_lock(home).is_ok_and(|l| !l.plugins.contains_key(name))
+}
+
 pub fn remove_managed(name: &str) -> anyhow::Result<()> {
     let home = home()?;
     migrate_commands_json(&home);
     validate_name(name)?;
-    gray_pkg::ops::remove(name)?;
+    let mut removed = remove_commands_entry(&home, name)?;
+    if load_lock(&home)?.plugins.contains_key(name) {
+        gray_pkg::ops::remove(name)?;
+        removed = true;
+    }
+    let cli_root = home.join("plugins/cli");
+    if cli_root.is_dir() {
+        let prefix = format!("{name}-");
+        for dir in std::fs::read_dir(&cli_root)?.flatten() {
+            let dir = dir.path();
+            if dir.is_dir()
+                && dir
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+            {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+    anyhow::ensure!(removed, "not installed: {name}");
     let _ = std::fs::remove_file(home.join("plugins").join(format!("{name}-manifest.json")));
     let widgets = home.join("plugins/widgets.json");
     if let Ok(raw) = std::fs::read(&widgets)
@@ -618,12 +914,23 @@ pub fn remove_managed(name: &str) -> anyhow::Result<()> {
 pub fn set_managed_enabled(name: &str, on: bool) -> anyhow::Result<()> {
     let home = home()?;
     migrate_commands_json(&home);
+    if commands_only(&home, name) {
+        return update_commands_entry(&home, name, |e| {
+            e.enabled = on;
+            if !on {
+                e.global = false;
+            }
+        });
+    }
     gray_pkg::ops::set_enabled(name, on)
 }
 
 pub fn set_managed_global(name: &str, on: bool) -> anyhow::Result<()> {
     let home = home()?;
     migrate_commands_json(&home);
+    if commands_only(&home, name) {
+        return update_commands_entry(&home, name, |e| e.global = on);
+    }
     gray_pkg::ops::set_global(name, on)
 }
 
@@ -657,7 +964,10 @@ fn is_local_command(home: &Path, name: &str) -> bool {
                 .get(name)
                 .map(|e| e.cli_argv.is_some() && e.hash.is_empty())
         })
-        .unwrap_or(false)
+        .unwrap_or_else(|| {
+            commands_cli_entry(&commands_or_empty(home), name, false)
+                .is_some_and(|e| e.hash.is_empty())
+        })
 }
 
 fn removed_builtin(name: &str) -> Option<&'static str> {
@@ -699,7 +1009,7 @@ async fn index_owner_hint(name: &str) -> Option<String> {
         })
         .map(|(owner, _)| {
             format!(
-                "'{name}' is provided by the {owner} plugin — install it with: gray plugin install {owner}"
+                "'{name}' is provided by the {owner} plugin — install it with: gray install plugin {owner}"
             )
         })
 }
@@ -763,17 +1073,20 @@ fn disabled_hint(home: &Path, entry_home: &Path, project: Option<&LockFile>, nam
     format!("re-enable with: gray plugin enable {name}")
 }
 
-fn user_home_lock(home: &Path) -> Option<(PathBuf, LockFile)> {
+fn user_home_lock(home: &Path) -> Option<(PathBuf, LockFile, LockFile)> {
     let user = gray_core::paths::gray_user_home()
         .filter(|u| crate::providers::registry::differs(home, u))?;
     migrate_commands_json(&user);
-    load_lock(&user).ok().map(|lock| (user, lock))
+    let lock = load_lock(&user).ok()?;
+    let commands = commands_or_empty(&user);
+    Some((user, lock, commands))
 }
 
 pub async fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     validate_name(name)?;
     migrate_commands_json(home);
     let lock = load_lock(home)?;
+    let commands = load_commands(home)?;
     let project = std::env::current_dir()
         .ok()
         .and_then(|cwd| LockFile::load(&gray_plugin::lock::project_lock_path(&cwd)).ok());
@@ -781,8 +1094,8 @@ pub async fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result
 
     let mut sidecar_named = false;
     let mut direct = None;
-    for (h, l, global_only) in std::iter::once((home.to_path_buf(), &lock, false))
-        .chain(user_home.iter().map(|(u, l)| (u.clone(), l, true)))
+    for (h, l, c, global_only) in std::iter::once((home.to_path_buf(), &lock, &commands, false))
+        .chain(user_home.iter().map(|(u, l, c)| (u.clone(), l, c, true)))
     {
         match l.plugins.get(name) {
             Some(e) if e.cli_argv.is_some() && (!global_only || e.global) => {
@@ -794,12 +1107,16 @@ pub async fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result
             }
             _ => {}
         }
+        if let Some(e) = commands_cli_entry(c, name, global_only) {
+            direct = Some((e, h));
+            break;
+        }
     }
     let (entry, entry_home, entry_name, prepend) = match direct {
         Some((e, u)) => (e, u, name.to_string(), false),
         None => {
             let mut claimers = owners_for_command(home, name, &lock, false);
-            if let Some((u, l)) = &user_home {
+            if let Some((u, l, _)) = &user_home {
                 claimers.extend(owners_for_command(u, name, l, true));
             }
             let (ready, dead): (Vec<_>, Vec<_>) =
@@ -826,7 +1143,7 @@ pub async fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result
                                 .map(str::to_string)
                                 .unwrap_or_else(|| {
                                     format!(
-                                        "no plugin command '{name}' — install it with: gray plugin install {name}"
+                                        "no plugin command '{name}' — install it with: gray install plugin {name}"
                                     )
                                 }),
                         }
@@ -1094,6 +1411,7 @@ pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option
     let home = home()?;
     migrate_commands_json(&home);
     let lock = load_lock(&home)?;
+    let commands = commands_or_empty(&home);
     let project = std::env::current_dir()
         .ok()
         .and_then(|cwd| LockFile::load(&gray_plugin::lock::project_lock_path(&cwd)).ok());
@@ -1101,16 +1419,22 @@ pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option
     let mut conflict_note = None;
     let selected = if let Some(entry) = lock.plugins.get(name).filter(|e| e.cli_argv.is_some()) {
         Some((home.clone(), name.to_string(), entry.clone(), false))
+    } else if let Some(entry) = commands_cli_entry(&commands, name, false) {
+        Some((home.clone(), name.to_string(), entry, false))
     } else {
-        let direct = user_home.as_ref().and_then(|(u, l)| {
+        let direct = user_home.as_ref().and_then(|(u, l, c)| {
             l.plugins
                 .get(name)
                 .filter(|e| e.cli_argv.is_some() && e.global)
                 .map(|e| (u.clone(), name.to_string(), e.clone(), false))
+                .or_else(|| {
+                    commands_cli_entry(c, name, true)
+                        .map(|e| (u.clone(), name.to_string(), e, false))
+                })
         });
         direct.or_else(|| {
             let mut claimers = owners_for_command(&home, name, &lock, false);
-            if let Some((u, l)) = &user_home {
+            if let Some((u, l, _)) = &user_home {
                 claimers.extend(owners_for_command(u, name, l, true));
             }
             let (ready, dead): (Vec<_>, Vec<_>) =
@@ -1176,7 +1500,7 @@ struct CompletionRow {
 struct CompletionTable {
     home: PathBuf,
     user_home: Option<PathBuf>,
-    stamps: Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    stamps: Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)>,
     rows: Vec<CompletionRow>,
 }
 
@@ -1191,8 +1515,9 @@ static COMPLETIONS: Mutex<CompletionCache> = Mutex::new(CompletionCache {
     builds: 0,
 });
 
-fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+fn file_mtime(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 fn enabled_in(user: &LockFile, project: Option<&LockFile>, name: &str, entry: &LockEntry) -> bool {
@@ -1208,7 +1533,7 @@ fn scan_lock_completions(
     lock: &LockFile,
     project: Option<&LockFile>,
     global_only: bool,
-    stamps: &mut Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    stamps: &mut Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)>,
     rows: &mut Vec<CompletionRow>,
     seen: &mut std::collections::HashSet<String>,
 ) {
@@ -1463,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_inserts_commands_entries_with_cli_argv() {
+    fn migrate_keeps_orphan_command_rows_in_the_live_registry() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
         write_commands(
@@ -1471,25 +1796,117 @@ mod tests {
             &serde_json::json!({"demo": cli_entry(&["/usr/bin/demo"])}),
         );
         migrate_commands_json(home);
-        let lock = load_lock(home).unwrap();
-        let entry = &lock.plugins["demo"];
+        // A CLI-only row must never create a lock entry: the plugin writes
+        // one itself when `gray <name> setup` registers the sidecar argv,
+        // and a foreign argv there makes register() refuse to overwrite.
+        assert!(!load_lock(home).unwrap().plugins.contains_key("demo"));
+        let registry = load_commands(home).unwrap();
+        let entry = commands_cli_entry(&registry, "demo", false).unwrap();
         assert_eq!(
             entry.cli_argv.as_deref(),
             Some(&["/usr/bin/demo".to_string()][..])
         );
-        assert_eq!(entry.argv, vec!["/usr/bin/demo".to_string()]);
+        assert!(home.join("plugins/commands.json").exists());
+        assert!(!home.join("plugins/commands.json.migrated").exists());
+    }
 
-        assert!(!home.join("plugins/commands.json").exists());
-        assert!(home.join("plugins/commands.json.migrated").exists());
-        write_lock(
+    #[test]
+    fn migrate_rewrites_unconsumed_rows_back_to_commands_json() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let bare = LockEntry {
+            ecosystem: "gray-native".into(),
+            argv: vec!["/sidecar".into()],
+            ..Default::default()
+        };
+        write_lock(home, &serde_json::json!({"demo": bare}));
+        write_commands(
             home,
-            &serde_json::json!({"demo": cli_entry(&["/usr/bin/kept"])}),
+            &serde_json::json!({
+                "demo": cli_entry(&["/usr/bin/demo"]),
+                "solo": cli_entry(&["/usr/bin/solo"]),
+            }),
         );
         migrate_commands_json(home);
+        let lock = load_lock(home).unwrap();
         assert_eq!(
-            load_lock(home).unwrap().plugins["demo"].argv,
-            vec!["/usr/bin/kept".to_string()]
+            lock.plugins["demo"].cli_argv.as_deref(),
+            Some(&["/usr/bin/demo".to_string()][..])
         );
+        let registry = load_commands(home).unwrap();
+        assert!(!registry.plugins.contains_key("demo"));
+        assert!(registry.plugins.contains_key("solo"));
+        assert!(home.join("plugins/commands.json").exists());
+        assert!(!home.join("plugins/commands.json.migrated").exists());
+    }
+
+    #[test]
+    fn commands_cli_entry_respects_the_global_flag() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let mut local = cli_entry(&["/usr/bin/local"]);
+        local.global = false;
+        let mut shared = cli_entry(&["/usr/bin/shared"]);
+        shared.global = true;
+        write_commands(home, &serde_json::json!({"local": local, "shared": shared}));
+        let registry = load_commands(home).unwrap();
+        assert!(commands_cli_entry(&registry, "local", true).is_none());
+        assert!(commands_cli_entry(&registry, "shared", true).is_some());
+        assert!(commands_cli_entry(&registry, "local", false).is_some());
+    }
+
+    #[test]
+    fn commands_only_rows_update_and_remove_without_touching_the_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        write_commands(
+            home,
+            &serde_json::json!({"demo": cli_entry(&["/usr/bin/demo"])}),
+        );
+        assert!(commands_only(home, "demo"));
+        update_commands_entry(home, "demo", |e| {
+            e.enabled = false;
+            e.global = false;
+        })
+        .unwrap();
+        assert!(!load_commands(home).unwrap().plugins["demo"].enabled);
+        assert!(!load_lock(home).unwrap().plugins.contains_key("demo"));
+        assert!(remove_commands_entry(home, "demo").unwrap());
+        assert!(!commands_only(home, "demo"));
+        assert!(!remove_commands_entry(home, "demo").unwrap());
+    }
+
+    #[test]
+    fn commands_only_is_false_once_a_lock_entry_exists() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        write_commands(
+            home,
+            &serde_json::json!({"demo": cli_entry(&["/usr/bin/demo"])}),
+        );
+        assert!(commands_only(home, "demo"));
+        let bare = LockEntry {
+            ecosystem: "gray-native".into(),
+            argv: vec!["/sidecar".into()],
+            ..Default::default()
+        };
+        write_lock(home, &serde_json::json!({"demo": bare}));
+        assert!(!commands_only(home, "demo"));
+        assert!(!commands_only(home, "missing"));
+    }
+
+    #[test]
+    fn list_managed_includes_live_commands_rows() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        write_commands(
+            home,
+            &serde_json::json!({"cli-only": cli_entry(&["/usr/bin/x"])}),
+        );
+        let rows = list_managed(home).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "cli-only");
+        assert!(rows[0].cli);
     }
 
     #[test]
@@ -1515,6 +1932,8 @@ mod tests {
             entry.cli_argv.as_deref(),
             Some(&["/usr/bin/demo".to_string()][..])
         );
+        assert!(!home.join("plugins/commands.json").exists());
+        assert!(home.join("plugins/commands.json.migrated").exists());
     }
 
     #[test]
@@ -1533,6 +1952,8 @@ mod tests {
             load_lock(home).unwrap().plugins["demo"].cli_argv.as_deref(),
             Some(&["/current/bin".to_string()][..])
         );
+        assert!(!home.join("plugins/commands.json").exists());
+        assert!(home.join("plugins/commands.json.migrated").exists());
     }
 
     #[test]

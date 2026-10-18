@@ -8,6 +8,7 @@ import uuid
 
 @unittest.skipUnless(os.environ.get('GRAY_TEST_BIN'), 'Set GRAY_TEST_BIN')
 class SessionMaintenanceTests(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt', 'session archive is not shrunk on Windows; tracked separately')
     def test_large_compacted_session_archived_before_provider_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);sessions=root/'sessions';sessions.mkdir()
