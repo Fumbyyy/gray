@@ -232,4 +232,3 @@ fn welcome_sweep_draws_to_the_full_mark() {
         "frames must hold the banner's height"
     );
 }
-

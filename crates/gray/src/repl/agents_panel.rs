@@ -692,19 +692,18 @@ fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer) {
     let mut rows: Vec<Line<'static>> = ibox.lines[first..first + box_h as usize].to_vec();
     for line in &mut rows {
         for (i, span) in line.spans.iter_mut().enumerate() {
-            span.style = if i == 0
-                && span.content == format!(" {} ", crate::tui::arrow_glyph()).as_str()
-            {
-                span.style.fg(if v.chat.focus {
-                    theme.accent
+            span.style =
+                if i == 0 && span.content == format!(" {} ", crate::tui::arrow_glyph()).as_str() {
+                    span.style.fg(if v.chat.focus {
+                        theme.accent
+                    } else {
+                        theme.text_dim
+                    })
+                } else if !v.chat.focus {
+                    span.style.fg(theme.text_dim)
                 } else {
-                    theme.text_dim
-                })
-            } else if !v.chat.focus {
-                span.style.fg(theme.text_dim)
-            } else {
-                span.style
-            };
+                    span.style
+                };
         }
     }
     frame.render_widget(Paragraph::new(rows), input);

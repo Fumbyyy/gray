@@ -477,8 +477,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let footer_y = attach_y + attach_h;
 
         if let Some((started, label)) = &tui.status {
-            let label_text =
-                format!(" {} {label}\u{2026}", crate::tui::glyph("\u{2b21}", "o"));
+            let label_text = format!(" {} {label}\u{2026}", crate::tui::glyph("\u{2b21}", "o"));
 
             let elapsed = match compaction_elapsed {
                 Some(d) => d,
@@ -787,10 +786,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                         Some(start) => {
                             let frame = (start.elapsed().as_millis() / 80) as usize % 10;
                             let spin = if crate::tui::unicode_safe() {
-                                "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-                                    .chars()
-                                    .nth(frame)
-                                    .unwrap_or('⠋')
+                                "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".chars().nth(frame).unwrap_or('⠋')
                             } else {
                                 "|/-\\".chars().nth(frame % 4).unwrap_or('|')
                             };

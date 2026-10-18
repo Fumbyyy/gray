@@ -206,7 +206,7 @@ pub(crate) fn print_mascot() -> bool {
         return false;
     }
     let (cols, rows) = crossterm::terminal::size().unwrap_or((0, 0));
-    if !crate::tui::unicode_safe() || !crossterm::ansi_support::supports_ansi() {
+    if !crate::tui::unicode_safe() || !crate::tui::ansi_supported() {
         return print_ascii_mascot(cols, rows);
     }
     let Some(grid) = decode_grid(cols, rows) else {
@@ -242,7 +242,7 @@ fn print_ascii_mascot(term_cols: u16, term_rows: u16) -> bool {
     let Some(grid) = decode_ascii_grid(term_cols, term_rows) else {
         return false;
     };
-    let color = crossterm::ansi_support::supports_ansi();
+    let color = crate::tui::ansi_supported();
     let pad = (term_cols as usize).saturating_sub(grid.cols) / 2;
     let mut out = std::io::stdout().lock();
     for row in 0..grid.rows {

@@ -169,8 +169,11 @@ pub(crate) fn live_tool_rows(
 
             if let Some(line) = headers.first_mut().filter(|_| t.running) {
                 let filled = format!("{} ", crate::tui::glyph("\u{2b22}", "#"));
-                let prefix =
-                    usize::from(line.spans.first().is_some_and(|s| s.content == filled.as_str()));
+                let prefix = usize::from(
+                    line.spans
+                        .first()
+                        .is_some_and(|s| s.content == filled.as_str()),
+                );
                 if prefix == 1 {
                     line.spans[0].content =
                         format!("{} ", crate::tui::glyph("\u{2b21}", "o")).into();
@@ -694,8 +697,8 @@ pub(crate) fn welcome_body_lines_at(
         ));
         title.push(Span::raw(" "));
     }
-    let title_w = display_width(if safe { "gray \u{25c6} " } else { "gray " })
-        + display_width(&version);
+    let title_w =
+        display_width(if safe { "gray \u{25c6} " } else { "gray " }) + display_width(&version);
     title.push(Span::styled(version, Style::default().fg(theme.text_muted)));
     body.push(centered(title, title_w));
     body.push(Line::from(""));

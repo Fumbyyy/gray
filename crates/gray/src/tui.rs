@@ -123,7 +123,7 @@ fn modern_windows_terminal() -> bool {
         || var_os("ANSICON").is_some()
         || var_os("MSYSTEM").is_some()
         || var_os("TERM").is_some()
-        || var("ConEmuANSI").map_or(false, |v| v == "ON")
+        || var("ConEmuANSI").is_ok_and(|v| v == "ON")
 }
 
 pub fn unicode_safe() -> bool {
@@ -138,7 +138,7 @@ pub fn unicode_safe() -> bool {
     if !std::io::stdout().is_terminal() {
         return true;
     }
-    if std::env::var("TERM").map_or(false, |t| t == "dumb") {
+    if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
         return false;
     }
     #[cfg(windows)]
@@ -154,11 +154,7 @@ pub(crate) fn arrow_glyph() -> &'static str {
 }
 
 pub(crate) fn glyph(unicode: &'static str, ascii: &'static str) -> &'static str {
-    if unicode_safe() {
-        unicode
-    } else {
-        ascii
-    }
+    if unicode_safe() { unicode } else { ascii }
 }
 
 pub fn logo_lines() -> Vec<String> {
@@ -186,13 +182,23 @@ pub fn blend_color(
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn ansi_supported() -> bool {
+    crossterm::ansi_support::supports_ansi()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn ansi_supported() -> bool {
+    true
+}
+
 pub fn print_logo() {
     use std::io::IsTerminal;
     if !std::io::stdout().is_terminal() {
         return;
     }
     let no_color = std::env::var_os("NO_COLOR").is_some();
-    let ansi = crossterm::ansi_support::supports_ansi();
+    let ansi = ansi_supported();
     let lines = logo_lines();
     let rows = lines.len().max(1) as f32;
     let max_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(1) as f32;
