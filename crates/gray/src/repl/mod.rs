@@ -163,6 +163,8 @@ pub(crate) mod handlers;
 pub(crate) mod jobs;
 pub(crate) mod key_watcher;
 pub(crate) mod maintenance;
+pub(crate) mod pager;
+pub(crate) mod picker;
 pub(crate) mod plugin_cmds;
 pub(crate) mod prompt_turn;
 mod session;

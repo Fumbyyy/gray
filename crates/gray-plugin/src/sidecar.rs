@@ -12,7 +12,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, timeout};
 
-use gray_core::agent::{CommandOutcome, InputSubmit, Tool, ToolContext, ToolOutput};
+use gray_core::agent::{
+    CommandOutcome, InputSubmit, PanelSpec, PickerSpec, Tool, ToolContext, ToolOutput,
+};
 use gray_core::credential::CredentialMaterial;
 use gray_core::message::{Message, ToolDef};
 
@@ -1543,6 +1545,24 @@ pub(crate) fn command_outcome(v: &Value) -> Option<CommandOutcome> {
     }
     if let Some(p) = field("prompt") {
         return Some(CommandOutcome::Prompt(p.to_string()));
+    }
+    if let Some(spec) = v.get("panel") {
+        return Some(match serde_json::from_value::<PanelSpec>(spec.clone()) {
+            Ok(spec) => CommandOutcome::Panel(spec),
+            Err(e) => match field("text") {
+                Some(t) => CommandOutcome::Say(t.to_string()),
+                None => CommandOutcome::Say(format!("invalid panel result: {e}")),
+            },
+        });
+    }
+    if let Some(spec) = v.get("picker") {
+        return Some(match serde_json::from_value::<PickerSpec>(spec.clone()) {
+            Ok(spec) => CommandOutcome::Picker(spec),
+            Err(e) => match field("text") {
+                Some(t) => CommandOutcome::Say(t.to_string()),
+                None => CommandOutcome::Say(format!("invalid picker result: {e}")),
+            },
+        });
     }
     field("text").map(|t| CommandOutcome::Say(t.to_string()))
 }

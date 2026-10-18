@@ -440,6 +440,8 @@ pub(crate) async fn dispatch_command(
                     Some(CommandOutcome::Prompt(prompt)) => ReplCommand::Prompt(prompt),
                     Some(CommandOutcome::AgentPicker(_))
                     | Some(CommandOutcome::SubagentSettings(_))
+                    | Some(CommandOutcome::Panel(_))
+                    | Some(CommandOutcome::Picker(_))
                     | None => ReplCommand::ProviderLogin(provider_id),
                     Some(CommandOutcome::Say(text)) => {
                         say(tui.as_ref().map(|(s, _)| s), &text);
@@ -563,8 +565,9 @@ pub(crate) async fn dispatch_command(
                 return Ok(Flow::Continue);
             };
             let mut handled = false;
-            if let Some(outcome) = run_plugin_command(&hooks, &name, argv.clone()).await {
-                match outcome {
+            let mut outcome = run_plugin_command(&hooks, &name, argv.clone()).await;
+            while let Some(oc) = outcome.take() {
+                match oc {
                     CommandOutcome::Say(text) => {
                         say(tui.as_ref().map(|(s, _)| s), &text);
                     }
@@ -645,6 +648,103 @@ pub(crate) async fn dispatch_command(
                             None => "subagents settings needs the TUI".to_string(),
                         };
                         say(tui.as_ref().map(|(s, _)| s), &msg);
+                    }
+
+                    CommandOutcome::Panel(spec) => {
+                        let tui_shared = tui.as_ref().map(|(s, _)| s);
+                        if let Some(shared) = tui_shared {
+                            let pages = super::pager::pages_from_spec(&spec);
+                            if pages.is_empty() {
+                                say_lines(tui_shared, super::pager::spec_lines(&spec));
+                            } else {
+                                let bg = shared.lock().expect("tui lock").snapshot();
+                                let mut refresh: Option<
+                                    Box<dyn FnMut() -> Vec<super::pager::PagerPage>>,
+                                > = spec.refreshable.then(|| {
+                                    let hooks = hooks.clone();
+                                    let name = name.clone();
+                                    let argv = argv.clone();
+                                    Box::new(move || {
+                                        let out = tokio::task::block_in_place(|| {
+                                            tokio::runtime::Handle::current().block_on(
+                                                run_plugin_command(&hooks, &name, argv.clone()),
+                                            )
+                                        });
+                                        super::pager::pages_from_outcome(out)
+                                    })
+                                        as Box<dyn FnMut() -> Vec<super::pager::PagerPage>>
+                                });
+                                let r = {
+                                    let refresh = refresh.as_deref_mut();
+                                    with_modal_sync(tui_shared, move || {
+                                        super::pager::run_pager(pages, refresh, &bg)
+                                    })
+                                };
+                                if r.is_err() {
+                                    say_lines(tui_shared, super::pager::spec_lines(&spec));
+                                }
+                            }
+                        } else {
+                            say_lines(None, super::pager::spec_lines(&spec));
+                        }
+                    }
+
+                    CommandOutcome::Picker(spec) => {
+                        let tui_shared = tui.as_ref().map(|(s, _)| s);
+                        if let Some(shared) = tui_shared {
+                            if spec.items.is_empty() {
+                                say_lines(tui_shared, super::picker::spec_lines(&spec));
+                            } else {
+                                let bg = shared.lock().expect("tui lock").snapshot();
+                                let sel = spec
+                                    .selected_id
+                                    .as_deref()
+                                    .and_then(|id| spec.items.iter().position(|i| i.id == id))
+                                    .unwrap_or(0);
+                                let trailing = |i: &gray_core::agent::PickerItem| {
+                                    i.description
+                                        .as_deref()
+                                        .filter(|d| !d.is_empty())
+                                        .map(|d| {
+                                            vec![ratatui::text::Span::styled(
+                                                d.to_string(),
+                                                ratatui::style::Style::default()
+                                                    .fg(crate::theme::theme().text_dim),
+                                            )]
+                                        })
+                                        .unwrap_or_default()
+                                };
+                                let mut picker = super::picker::ListPicker {
+                                    title: spec.title.as_str(),
+                                    items: &spec.items,
+                                    label: Box::new(|i: &gray_core::agent::PickerItem| {
+                                        i.label.as_str()
+                                    }),
+                                    trailing: Some(Box::new(trailing)),
+                                    footer: None,
+                                    on_highlight: None,
+                                    selected: sel,
+                                };
+                                match with_modal_sync(tui_shared, || {
+                                    super::picker::run_list_picker(&mut picker, &bg)
+                                }) {
+                                    Ok(Some(idx)) => {
+                                        outcome = run_plugin_command(
+                                            &hooks,
+                                            &name,
+                                            super::picker::pick_argv(&argv, &spec.items[idx].id),
+                                        )
+                                        .await;
+                                    }
+                                    Ok(None) => {}
+                                    Err(_) => {
+                                        say_lines(tui_shared, super::picker::spec_lines(&spec));
+                                    }
+                                }
+                            }
+                        } else {
+                            say_lines(None, super::picker::spec_lines(&spec));
+                        }
                     }
                 }
                 handled = true;

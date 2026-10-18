@@ -256,8 +256,9 @@ fn handle_usage_inner(
                 };
                 usage_panel::usage_pages(&input, &collect_subscription_usage())
             };
-            let opened =
-                super::with_modal_sync(tui, || usage_panel::run_usage_modal(&mut rebuild, &bg));
+            let opened = super::with_modal_sync(tui, || {
+                super::pager::run_pager(rebuild(), Some(&mut rebuild), &bg)
+            });
             if opened.is_ok() {
                 return;
             }

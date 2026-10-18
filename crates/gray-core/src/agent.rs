@@ -363,6 +363,56 @@ pub struct PluginCommand {
     pub description: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelStyle {
+    #[serde(default)]
+    pub fg: Option<String>,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub dim: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelSpan {
+    pub text: String,
+    #[serde(default)]
+    pub style: Option<PanelStyle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelPage {
+    pub tab: String,
+    pub title: String,
+    pub lines: Vec<Vec<PanelSpan>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelSpec {
+    pub title: String,
+    pub pages: Vec<PanelPage>,
+    #[serde(default)]
+    pub refreshable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickerItem {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickerSpec {
+    pub title: String,
+    pub items: Vec<PickerItem>,
+    #[serde(default)]
+    pub selected_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandOutcome {
     Say(String),
@@ -373,6 +423,10 @@ pub enum CommandOutcome {
     AgentPicker(String),
 
     SubagentSettings(String),
+
+    Panel(PanelSpec),
+
+    Picker(PickerSpec),
 }
 
 #[async_trait]

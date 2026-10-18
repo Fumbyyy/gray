@@ -1016,6 +1016,12 @@ async fn plugin_command_result(
             prompt,
             fallback_text: format!("/{name} asked for a turn"),
         })),
+        Some(gray_plugin::CommandOutcome::Panel(spec)) => Ok(Some(CommandResult::text(
+            crate::repl::pager::spec_plain(&spec),
+        ))),
+        Some(gray_plugin::CommandOutcome::Picker(spec)) => Ok(Some(CommandResult::text(
+            crate::repl::picker::spec_plain(&spec),
+        ))),
         Some(gray_plugin::CommandOutcome::ModelPicker(_))
         | Some(gray_plugin::CommandOutcome::AgentPicker(_))
         | Some(gray_plugin::CommandOutcome::SubagentSettings(_)) => Err(CmdError::local(name)),
