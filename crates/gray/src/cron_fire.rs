@@ -28,7 +28,10 @@ pub fn is_silent_response(text: &str) -> bool {
 pub const DELIVERY_EXCERPT_CHARS: usize = 4000;
 
 pub fn mirror_message(name: &str, body: &str) -> String {
-    format!("[Cron delivery: {name}]\n{body}")
+    format!(
+        "{}{name}]\n{body}",
+        crate::composer::transcript::CRON_DELIVERY_MARKER
+    )
 }
 
 pub fn delivery_excerpt(text: &str) -> String {

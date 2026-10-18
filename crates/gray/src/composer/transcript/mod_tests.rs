@@ -590,3 +590,42 @@ fn viewed_image_lines_skip_non_image_bash() {
     let args = serde_json::json!({"command": "cat x.png | head"});
     assert!(super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40).is_none());
 }
+
+#[test]
+fn split_synthetic_prompt_parts_notifications() {
+    let (visible, notices) = split_synthetic_prompt("plain question");
+    assert_eq!(visible, "plain question");
+    assert!(notices.is_empty());
+
+    let (visible, notices) = split_synthetic_prompt(
+        "↳ from cli\nhi\n\n[Background task notification]\nBackground job a finished (exit 0) after 1s · log /tmp/x\ntail it\n\n[Background task notification]\nodd notice\nrest",
+    );
+    assert_eq!(visible, "↳ from cli\nhi");
+    assert_eq!(
+        notices,
+        vec![
+            "Background job a finished (exit 0) after 1s · log /tmp/x".to_string(),
+            "odd notice".to_string(),
+        ]
+    );
+
+    let (visible, notices) = split_synthetic_prompt(
+        "[Background task notification]\nBackground job b finished (exit 1) after 2s",
+    );
+    assert!(visible.is_empty());
+    assert_eq!(notices, vec!["Background job b finished (exit 1) after 2s"]);
+
+    // cron deliveries collapse the same way, and an interleaved
+    // `↳ from` send stays visible between notice segments
+    let (visible, notices) = split_synthetic_prompt(
+        "[Cron delivery: nightly]\nbuilt 3 crates ok\n\n↳ from cli\nhey\n\n[Background task notification]\nBackground job c finished (exit 0) after 3s",
+    );
+    assert_eq!(visible, "↳ from cli\nhey");
+    assert_eq!(
+        notices,
+        vec![
+            "built 3 crates ok".to_string(),
+            "Background job c finished (exit 0) after 3s".to_string(),
+        ]
+    );
+}

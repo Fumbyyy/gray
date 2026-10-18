@@ -458,3 +458,52 @@ fn cut_cells_ends_a_cut_inside_the_budget() {
     assert_eq!(cut_cells("abc", 1), "…");
     assert_eq!(cut_cells("abc", 0), "");
 }
+
+#[test]
+fn replay_background_notice_renders_dim_line_not_prompt() {
+    let mut v = viewer_stub();
+    replay_entry(
+        &mut v,
+        &entry(
+            Role::User,
+            vec![ContentBlock::text(
+                "[Background task notification]\nBackground job sh finished (exit 0) after 1s · log /tmp/x\nread it with tail",
+            )],
+        ),
+        Path::new("/c"),
+        60,
+    );
+    assert!(!v.transcript.iter().any(|e| matches!(
+        e,
+        TranscriptEntry::UserPrompt(t, _) if t.contains("[Background task notification]")
+    )));
+    assert!(v.transcript.iter().any(|e| matches!(
+        e,
+        TranscriptEntry::StyledLines { lines, .. }
+            if lines.iter().any(|l| l.to_string().contains("Background job sh finished"))
+    )));
+}
+
+#[test]
+fn replay_wake_prompt_keeps_sent_text_and_dims_notice() {
+    let mut v = viewer_stub();
+    replay_entry(
+        &mut v,
+        &entry(
+            Role::User,
+            vec![ContentBlock::text(
+                "↳ from cli\nhey there\n\n[Background task notification]\nBackground job sh finished (exit 0) after 1s · log /tmp/x",
+            )],
+        ),
+        Path::new("/c"),
+        60,
+    );
+    assert!(v.transcript.iter().any(|e| matches!(
+        e,
+        TranscriptEntry::UserPrompt(t, _) if t == "↳ from cli\nhey there"
+    )));
+    assert!(!v.transcript.iter().any(|e| matches!(
+        e,
+        TranscriptEntry::UserPrompt(t, _) if t.contains("[Background task notification]")
+    )));
+}

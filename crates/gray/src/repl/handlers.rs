@@ -582,11 +582,18 @@ pub(crate) fn apply_model_selection_at(
     let (_, list_key, _) = crate::setup::picker_scope(config);
     let cached = crate::setup::saved_models_for(&list_key, &config.base_url);
     let mut checked = crate::setup::validate_direct_model_id(raw, &cached);
+    let cached_variant = if checked.is_err() {
+        crate::setup::decompose_model_variant(raw, &cached)
+    } else {
+        None
+    };
     let mut live_rows: Vec<(String, String)> = Vec::new();
-    if checked.is_err() {
+    if checked.is_err() && cached_variant.is_none() {
+        let started = std::time::Instant::now();
         let (_, known) = crate::setup::provider_models_for_config(config);
         checked = crate::setup::validate_direct_model_id(raw, &known);
         live_rows = known;
+        log::debug!(target: "gray_timing", "model list live fetch elapsed_ms={}", started.elapsed().as_millis());
     }
 
     let mut ids = cached.clone();
@@ -598,10 +605,12 @@ pub(crate) fn apply_model_selection_at(
     let (m, variant_tier, id_fast) = match checked {
         Ok(canonical) => crate::setup::decompose_model_variant(&canonical, &ids)
             .unwrap_or((canonical, None, false)),
-        Err(msg) => match crate::setup::decompose_model_variant(raw, &ids) {
-            Some(v) => v,
-            None => return Err(msg),
-        },
+        Err(msg) => {
+            match cached_variant.or_else(|| crate::setup::decompose_model_variant(raw, &ids)) {
+                Some(v) => v,
+                None => return Err(msg),
+            }
+        }
     };
 
     let fast = if std::env::var_os("GRAY_FAST").is_some() {

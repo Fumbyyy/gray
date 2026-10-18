@@ -2589,7 +2589,7 @@ fn read_title(root: &Path, id: &str) -> Option<String> {
 pub(crate) fn opener_tag(first: &str) -> Option<&'static str> {
     let first = first.trim_start();
     let head: String = first.chars().take(160).collect();
-    if first.starts_with("[Background task notification]") {
+    if first.starts_with(crate::composer::transcript::BG_NOTICE_MARKER) {
         Some("background")
     } else if head.contains("subagent of a parent Gray") {
         Some("subagent")
