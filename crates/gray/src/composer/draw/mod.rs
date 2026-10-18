@@ -811,27 +811,14 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     "model" => {
                         let mut seg = Seg::new(model_text.clone(), t.text_bright);
                         if let Some(parts) = &tui.model_label_parts {
-                            let sk_lit = tui
-                                .live_tools
-                                .iter()
-                                .any(|tl| tl.running && tl.name.contains("handoff"));
-                            let lit = if sk_lit {
-                                Some(1)
-                            } else if tui.turn_started.is_some() {
-                                Some(0)
-                            } else {
-                                None
-                            };
                             seg.parts = Some(
                                 parts
                                     .iter()
                                     .map(|(txt, slot)| {
-                                        let c = match slot {
-                                            Some(_) if *slot == lit => t.accent,
-                                            Some(_) => t.text_bright,
-                                            None => muted,
-                                        };
-                                        (txt.clone(), c)
+                                        (
+                                            txt.clone(),
+                                            if slot.is_some() { t.text_bright } else { muted },
+                                        )
                                     })
                                     .collect(),
                             );

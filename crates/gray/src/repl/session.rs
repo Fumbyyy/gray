@@ -629,7 +629,7 @@ pub(crate) fn dispatch_agent_event(
                     display.preview(name),
                 );
                 t.atomic(|t| {
-                    t.upsert_live_tool(id, name, header, false);
+                    t.upsert_live_tool(id, header, false);
                     t.set_status(Some(&format!("Preparing tool: {name}")));
                 });
             }
@@ -650,7 +650,7 @@ pub(crate) fn dispatch_agent_event(
                 let preview = crate::repl::format::truncate_chars(&preview, 60);
 
                 t.atomic(|t| {
-                    t.upsert_live_tool(id, name, header, false);
+                    t.upsert_live_tool(id, header, false);
                     if preview.is_empty() {
                         t.set_status(Some(&format!("Preparing tool: {name}")));
                     } else {
@@ -676,7 +676,7 @@ pub(crate) fn dispatch_agent_event(
 
                 let header = tool_header(display, &name, args, Some(cwd));
                 t.atomic(|t| {
-                    t.upsert_live_tool(id, &name, header, true);
+                    t.upsert_live_tool(id, header, true);
                     t.set_status(Some("Working"));
                 });
             }

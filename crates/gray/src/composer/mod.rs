@@ -338,8 +338,6 @@ pub(crate) struct AskModal {
 #[derive(Clone, Debug)]
 pub(crate) struct LiveTool {
     pub(crate) id: String,
-
-    pub(crate) name: String,
     pub(crate) header: Vec<Line<'static>>,
     pub(crate) running: bool,
     pub(crate) tail: LiveToolTail,
@@ -1296,20 +1294,13 @@ impl Tui {
         self.turn_billed_output = Some(output_tokens);
     }
 
-    pub(crate) fn upsert_live_tool(
-        &mut self,
-        id: &str,
-        name: &str,
-        header: Vec<Line<'static>>,
-        running: bool,
-    ) {
+    pub(crate) fn upsert_live_tool(&mut self, id: &str, header: Vec<Line<'static>>, running: bool) {
         if let Some(slot) = self.live_tools.iter_mut().find(|t| t.id == id) {
             slot.header = header;
             slot.running = running;
         } else {
             self.live_tools.push(LiveTool {
                 id: id.to_string(),
-                name: name.to_string(),
                 header,
                 running,
                 tail: LiveToolTail::default(),
