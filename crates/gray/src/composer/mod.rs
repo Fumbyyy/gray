@@ -383,9 +383,13 @@ impl LiveToolTail {
     }
 
     fn rows(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.lines.iter().cloned().collect();
+        let mut out: Vec<String> = self
+            .lines
+            .iter()
+            .map(|l| crate::tool_fmt::expand_tabs(l))
+            .collect();
         if !self.carry.trim().is_empty() {
-            out.push(self.carry.clone());
+            out.push(crate::tool_fmt::expand_tabs(&self.carry));
         }
         if out.len() > LIVE_TAIL_LINES {
             out.drain(..out.len() - LIVE_TAIL_LINES);

@@ -231,3 +231,10 @@ fn tool_card_commit_keeps_emission_order_with_stream_text() {
         "history entries out of emission order: {entries:?}"
     );
 }
+
+#[test]
+fn live_tail_rows_expand_tabs() {
+    let mut tail = LiveToolTail::default();
+    tail.feed(b"    26\t.collect(),\npartial\tx");
+    assert_eq!(tail.rows(), ["    26  .collect(),", "partial x"]);
+}
