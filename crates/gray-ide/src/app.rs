@@ -1,4 +1,5 @@
 use crate::git;
+use crate::plugins::{self, HubEntry, Installed, PluginMsg};
 use crate::provider::{self, MODES, PROVIDERS, ProviderEvent, Turn, TurnRequest};
 use crate::store::{Event, Item, Role, Store, new_id, now};
 use crate::workspace::{self, FileEntry};
@@ -16,6 +17,7 @@ use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 
 actions!(
@@ -37,7 +39,8 @@ actions!(
         SaveFile,
         StopTurn,
         FocusComposer,
-        EffortPicker
+        EffortPicker,
+        TogglePluginsPanel
     ]
 );
 
@@ -60,6 +63,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-x", StopTurn, None),
         KeyBinding::new("ctrl-l", FocusComposer, None),
         KeyBinding::new("ctrl-shift-e", EffortPicker, None),
+        KeyBinding::new("ctrl-shift-p", TogglePluginsPanel, None),
     ]);
 }
 
@@ -67,6 +71,7 @@ pub fn bind_keys(cx: &mut App) {
 enum Panel {
     Files,
     Diff,
+    Plugins,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -101,6 +106,10 @@ enum Cmd {
     Project(String),
     Thread(String),
     ShowArchived,
+    TogglePlugins,
+    PluginInstall(String),
+    PluginRemove(String),
+    PluginEnable(String, bool),
     Settle,
     Snooze(i64),
     Worktree(String),
@@ -150,6 +159,12 @@ pub struct GrayApp {
     state_file: Option<PathBuf>,
     last_snapshot: String,
     _subs: Vec<Subscription>,
+    hub: Vec<HubEntry>,
+    hub_error: Option<String>,
+    installed: Vec<Installed>,
+    plugin_busy: Option<String>,
+    plugin_tx: Sender<PluginMsg>,
+    plugin_rx: Receiver<PluginMsg>,
 }
 
 impl GrayApp {
@@ -204,6 +219,7 @@ impl GrayApp {
                 }
             },
         ));
+        let (plugin_tx, plugin_rx) = channel();
         let mut app = Self {
             focus: cx.focus_handle(),
             store,
@@ -236,6 +252,12 @@ impl GrayApp {
             state_file: std::env::var_os("GRAY_IDE_STATE").map(PathBuf::from),
             last_snapshot: String::new(),
             _subs: subs,
+            hub: Vec::new(),
+            hub_error: None,
+            installed: Vec::new(),
+            plugin_busy: None,
+            plugin_tx,
+            plugin_rx,
         };
         if let Some(path) = initial {
             app.add_project(&path);
@@ -257,6 +279,7 @@ impl GrayApp {
             ThemeMode::Dark
         };
         Theme::change(mode, Some(window), cx);
+        apply_brand(cx);
         app.refresh_workspace(cx);
         app.composer.update(cx, |s, cx| s.focus(window, cx));
         cx.spawn(async move |this, cx| {
@@ -479,6 +502,11 @@ impl GrayApp {
             "restore" => Cmd::Restore,
             "stop" => Cmd::Stop,
             "settle" => Cmd::Settle,
+            "plugins" => Cmd::TogglePlugins,
+            "install" => Cmd::PluginInstall(arg),
+            "uninstall" => Cmd::PluginRemove(arg),
+            "enable" => Cmd::PluginEnable(arg, true),
+            "disable" => Cmd::PluginEnable(arg, false),
             "snooze" => Cmd::Snooze(arg.parse().unwrap_or(60)),
             "worktree" => Cmd::Worktree(arg),
             "effort" => Cmd::Effort(arg),
@@ -596,6 +624,24 @@ impl GrayApp {
             });
             self.refresh_workspace(cx);
         }
+        while let Ok(msg) = self.plugin_rx.try_recv() {
+            changed = true;
+            match msg {
+                PluginMsg::Hub(Ok(h)) => {
+                    self.hub = h;
+                    self.hub_error = None;
+                }
+                PluginMsg::Hub(Err(e)) => self.hub_error = Some(e),
+                PluginMsg::Installed(i) => self.installed = i,
+                PluginMsg::Done(label, r) => {
+                    self.plugin_busy = None;
+                    match r {
+                        Ok(line) => self.toast(format!("{label}: {line}"), false),
+                        Err(line) => self.toast(format!("{label} failed: {line}"), true),
+                    }
+                }
+            }
+        }
         if let Some(rx) = &self.terminal_rx {
             loop {
                 match rx.try_recv() {
@@ -691,6 +737,14 @@ impl GrayApp {
         items.push((k("Open settings"), k("Ctrl+,"), Cmd::Settings));
         items.push((k("Toggle theme"), k("Ctrl+Shift+L"), Cmd::ToggleTheme));
         items.push((k("Create checkpoint"), k("Git"), Cmd::Checkpoint));
+        items.push((k("Plugins"), k("Ctrl+Shift+P"), Cmd::TogglePlugins));
+        for h in &self.hub {
+            items.push((
+                format!("Install plugin: {}", h.name),
+                k("Plugin"),
+                Cmd::PluginInstall(h.name.clone()),
+            ));
+        }
         items.push((k("Settle or unsettle thread"), k("Thread"), Cmd::Settle));
         items.push((k("Snooze thread for 1 hour"), k("Thread"), Cmd::Snooze(60)));
         items.push((k("Unsnooze thread"), k("Thread"), Cmd::Snooze(0)));
@@ -889,6 +943,7 @@ impl GrayApp {
                     value: next.name().into(),
                 });
                 Theme::change(next, Some(window), cx);
+                apply_brand(cx);
             }
             Cmd::Provider(p) => {
                 if PROVIDERS.iter().any(|x| x.id == p) {
@@ -1049,6 +1104,45 @@ impl GrayApp {
                 self.refresh_workspace(cx);
             }
             Cmd::ShowArchived => self.show_archived = !self.show_archived,
+            Cmd::TogglePlugins => {
+                self.panel = if self.panel == Some(Panel::Plugins) {
+                    None
+                } else {
+                    Some(Panel::Plugins)
+                };
+                if self.panel == Some(Panel::Plugins) {
+                    plugins::refresh(self.plugin_tx.clone());
+                }
+            }
+            Cmd::PluginInstall(spec) => {
+                if spec.trim().is_empty() {
+                    self.toast("Plugin name or path required", true);
+                } else {
+                    self.plugin_busy = Some(spec.clone());
+                    plugins::run(
+                        self.plugin_tx.clone(),
+                        format!("Install {spec}"),
+                        vec!["install".into(), "-y".into(), spec],
+                    );
+                }
+            }
+            Cmd::PluginRemove(name) => {
+                self.plugin_busy = Some(name.clone());
+                plugins::run(
+                    self.plugin_tx.clone(),
+                    format!("Remove {name}"),
+                    vec!["remove".into(), name],
+                );
+            }
+            Cmd::PluginEnable(name, on) => {
+                self.plugin_busy = Some(name.clone());
+                let verb = if on { "enable" } else { "disable" };
+                plugins::run(
+                    self.plugin_tx.clone(),
+                    format!("{verb} {name}"),
+                    vec![verb.into(), name],
+                );
+            }
             Cmd::Settle => {
                 if let Some(t) = self
                     .active_thread
@@ -1259,6 +1353,10 @@ impl GrayApp {
             "terminal": self.terminal_lines.iter().rev().take(40).rev().cloned().collect::<Vec<_>>(),
             "composer": self.composer.read(cx).value().to_string(),
             "toast": self.toast.as_ref().map(|t| t.0.clone()),
+            "hub": self.hub.iter().map(|h| h.name.clone()).collect::<Vec<_>>(),
+            "hub_error": self.hub_error,
+            "plugins": self.installed.iter().map(|p| serde_json::json!({"name": p.name, "version": p.version, "enabled": p.enabled})).collect::<Vec<_>>(),
+            "plugin_busy": self.plugin_busy,
         });
         let s = snap.to_string();
         if s != self.last_snapshot {
@@ -1304,6 +1402,169 @@ fn chip(
 }
 
 impl GrayApp {
+    fn render_plugins(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let label = |s: &str| {
+            div()
+                .text_xs()
+                .font_family(t.mono_font_family.clone())
+                .text_color(t.muted_foreground)
+                .child(s.to_uppercase())
+        };
+        let badge = |s: &str| {
+            div()
+                .px_1p5()
+                .py_0p5()
+                .border_1()
+                .border_color(t.primary.opacity(0.4))
+                .bg(t.primary.opacity(0.1))
+                .text_color(t.primary)
+                .text_xs()
+                .font_family(t.mono_font_family.clone())
+                .child(s.to_uppercase())
+        };
+        let mut col = v_flex()
+            .id("plugins-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_3()
+            .gap_3();
+        col = col.child(label(&format!("Installed · {}", self.installed.len())));
+        if self.installed.is_empty() {
+            col = col.child(
+                div()
+                    .text_sm()
+                    .text_color(t.muted_foreground)
+                    .child("No plugins installed"),
+            );
+        }
+        for p in &self.installed {
+            let (n1, n2, on) = (p.name.clone(), p.name.clone(), p.enabled);
+            col = col.child(
+                h_flex()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .border_1()
+                    .border_color(t.border)
+                    .bg(t.popover)
+                    .child(
+                        div()
+                            .font_family(t.mono_font_family.clone())
+                            .text_sm()
+                            .child(p.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(t.muted_foreground)
+                            .child(p.version.clone()),
+                    )
+                    .when(!on, |s| s.child(badge("disabled")))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(SharedString::from(format!("plugin-toggle-{}", p.name)))
+                            .xsmall()
+                            .ghost()
+                            .label(if on { "Disable" } else { "Enable" })
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                this.run(Cmd::PluginEnable(n1.clone(), !on), w, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("plugin-remove-{}", p.name)))
+                            .xsmall()
+                            .ghost()
+                            .label("Remove")
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                this.run(Cmd::PluginRemove(n2.clone()), w, cx)
+                            })),
+                    ),
+            );
+        }
+        col = col.child(
+            div()
+                .mt_2()
+                .child(label(&format!("Hub · {}", self.hub.len()))),
+        );
+        if let Some(e) = &self.hub_error {
+            col = col.child(
+                div()
+                    .text_xs()
+                    .text_color(t.danger)
+                    .child(format!("Could not load {}: {e}", plugins::hub_url())),
+            );
+        } else if self.hub.is_empty() {
+            col = col.child(
+                div()
+                    .text_sm()
+                    .text_color(t.muted_foreground)
+                    .child("Loading catalog"),
+            );
+        }
+        for h in &self.hub {
+            let installed = self.installed.iter().any(|p| p.name == h.name);
+            let busy = self.plugin_busy.as_deref() == Some(h.name.as_str());
+            let name = h.name.clone();
+            col = col.child(
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .border_1()
+                    .border_color(t.border)
+                    .bg(hsla(0., 0., 0., 1.))
+                    .hover(|s| s.border_color(t.primary))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .font_family(t.mono_font_family.clone())
+                                    .font_semibold()
+                                    .child(h.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .child(format!("v{}", h.version)),
+                            )
+                            .when(h.official, |s| s.child(badge("official")))
+                            .when(h.verified, |s| s.child(badge("verified")))
+                            .when(h.kind != "plugin", |s| s.child(badge(&h.kind)))
+                            .child(div().flex_1())
+                            .child(if installed {
+                                Button::new(SharedString::from(format!("hub-installed-{}", h.name)))
+                                    .xsmall()
+                                    .ghost()
+                                    .label("Installed")
+                                    .icon(IconName::Check)
+                            } else {
+                                Button::new(SharedString::from(format!("hub-install-{}", h.name)))
+                                    .xsmall()
+                                    .primary()
+                                    .label(if busy { "Installing" } else { "Install" })
+                                    .loading(busy)
+                                    .on_click(cx.listener(move |this, _, w, cx| {
+                                        this.run(Cmd::PluginInstall(name.clone()), w, cx)
+                                    }))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(t.muted_foreground)
+                            .child(h.description.clone()),
+                    )
+                    .when(!h.author.is_empty(), |s| {
+                        s.child(label(&format!("by {}", h.author)))
+                    }),
+            );
+        }
+        col
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let mut list = v_flex()
@@ -1498,6 +1759,16 @@ impl GrayApp {
                             })),
                     )
                     .child(div().flex_1())
+                    .child(
+                        Button::new("open-plugins")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Star)
+                            .tooltip("Plugins (Ctrl+Shift+P)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run(Cmd::TogglePlugins, window, cx)
+                            })),
+                    )
                     .child(
                         Button::new("toggle-archived")
                             .ghost()
@@ -1934,6 +2205,18 @@ impl GrayApp {
                     })),
             )
             .child(
+                Button::new("panel-plugins")
+                    .ghost()
+                    .small()
+                    .label("Plugins")
+                    .selected(panel == Panel::Plugins)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.panel = Some(Panel::Plugins);
+                        plugins::refresh(this.plugin_tx.clone());
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("panel-diff")
                     .ghost()
                     .small()
@@ -1967,6 +2250,7 @@ impl GrayApp {
                     })),
             );
         let body: AnyElement = match panel {
+            Panel::Plugins => self.render_plugins(cx).into_any_element(),
             Panel::Diff => match &self.diff {
                 Some(state) => Diff::new(state).flex_1().min_h_0().into_any_element(),
                 None => v_flex()
@@ -2477,6 +2761,9 @@ impl Render for GrayApp {
             .on_action(cx.listener(|this, _: &ModelPicker, w, cx| {
                 this.open_palette(PaletteMode::Commands, "Model:", w, cx)
             }))
+            .on_action(cx.listener(|this, _: &TogglePluginsPanel, w, cx| {
+                this.run(Cmd::TogglePlugins, w, cx)
+            }))
             .on_action(cx.listener(|this, _: &EffortPicker, w, cx| {
                 this.open_palette(PaletteMode::Commands, "Effort:", w, cx)
             }))
@@ -2535,4 +2822,58 @@ fn expand_mentions(text: &str, root: &Path) -> String {
         }
     }
     out
+}
+
+fn hex(v: u32) -> Hsla {
+    rgb(v).into()
+}
+
+pub fn apply_brand(cx: &mut App) {
+    let dark = cx.theme().mode.is_dark();
+    let t = Theme::global_mut(cx);
+    let accent = hex(0xd4a373);
+    t.primary = accent;
+    t.primary_hover = hex(0xdfb891);
+    t.primary_active = hex(0xe8cdb0);
+    t.ring = accent;
+    t.caret = accent;
+    t.button_primary = accent;
+    t.button_primary_hover = hex(0xdfb891);
+    t.button_primary_active = hex(0xe8cdb0);
+    t.danger = hex(0xb7513f);
+    t.warning = accent;
+    t.radius = px(4.);
+    t.radius_lg = px(6.);
+    if !dark {
+        t.primary_foreground = hex(0x050506);
+        t.button_primary_foreground = hex(0x050506);
+        return;
+    }
+    t.background = hex(0x050506);
+    t.foreground = hex(0xeceae7);
+    t.muted = hex(0x131316);
+    t.muted_foreground = hex(0x8b8a86);
+    t.border = hex(0x1c1c20);
+    t.input = hex(0x2a2a30);
+    t.popover = hex(0x0a0a0b);
+    t.popover_foreground = hex(0xeceae7);
+    t.secondary = hex(0x131316);
+    t.secondary_hover = hex(0x1c1c20);
+    t.secondary_active = hex(0x2a2a30);
+    t.secondary_foreground = hex(0xeceae7);
+    t.accent = hex(0x131316);
+    t.accent_foreground = hex(0xeceae7);
+    t.sidebar = hex(0x0a0a0b);
+    t.sidebar_foreground = hex(0xeceae7);
+    t.sidebar_border = hex(0x1c1c20);
+    t.sidebar_accent = hex(0x131316);
+    t.sidebar_accent_foreground = hex(0xeceae7);
+    t.list_hover = hex(0x0e0e10);
+    t.list_active = hex(0x1c1c20);
+    t.list_active_border = accent;
+    t.tab_active = hex(0x0e0e10);
+    t.tab_active_foreground = hex(0xeceae7);
+    t.selection = hex(0x3a3a42);
+    t.primary_foreground = hex(0x050506);
+    t.button_primary_foreground = hex(0x050506);
 }

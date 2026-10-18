@@ -723,3 +723,68 @@ fn settle_snooze_effort_and_file_mentions() {
     assert!(msgs[3].1.contains("effort `high`"));
     assert!(msgs[3].1.contains("# demo"));
 }
+
+#[test]
+fn plugins_panel_browses_hub_and_manages_real_gray_plugins() {
+    let Some(bin) = gray_bin() else {
+        eprintln!("skipping: build the gray CLI first (cargo build -p gray at the repo root)");
+        return;
+    };
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("gray-e2e")
+        .join("plugin-fixture");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("gray-home")).unwrap();
+    let plugin = root.join("gray-hello");
+    fs::write(
+        &plugin,
+        "#!/bin/sh\nif [ \"$1\" = \"manifest\" ]; then\n  echo '{\"name\":\"hello\",\"version\":\"0.1.0\",\"tools\":[],\"commands\":[]}'\n  exit 0\nfi\ncat >/dev/null\n",
+    )
+    .unwrap();
+    sh(&root, "chmod +x gray-hello");
+    let hub = root.join("hub.json");
+    fs::write(
+        &hub,
+        r#"{"plugins":{"hello":{"kind":"plugin","version":"0.1.0","description":"Says hello from the hub","author":"official","official":true,"verified":true},"memory":{"kind":"plugin","version":"0.2.0","description":"Curated cross-session memory","author":"official","official":true}}}"#,
+    )
+    .unwrap();
+    let env = vec![
+        ("GRAY_IDE_GRAY_BIN".to_string(), bin.display().to_string()),
+        (
+            "GRAY_HOME".to_string(),
+            root.join("gray-home").display().to_string(),
+        ),
+        ("GRAY_HUB_INDEX".to_string(), hub.display().to_string()),
+    ];
+    let Some(g) = Gray::start_with("plugins", "fake", env) else {
+        return;
+    };
+    g.key("ctrl+shift+p");
+    let s = g.wait_for("hub loaded", |s| {
+        s["panel"] == "Plugins" && s["hub"].as_array().map(|h| h.len() == 2).unwrap_or(false)
+    });
+    assert_eq!(s["hub"][0], "hello");
+    assert!(s["plugins"].as_array().unwrap().is_empty());
+    g.send(&format!("/install {}", plugin.display()));
+    let s = g.wait_for("installed", |s| {
+        s["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "hello" && p["enabled"] == true)
+    });
+    assert!(s["toast"].as_str().unwrap().contains("Registered 'hello'"));
+    g.screenshot("installed");
+    g.send("/disable hello");
+    g.wait_for("disabled", |s| {
+        s["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "hello" && p["enabled"] == false)
+    });
+    g.send("/uninstall hello");
+    g.wait_for("removed", |s| {
+        s["plugins"].as_array().unwrap().is_empty() && s["plugin_busy"].is_null()
+    });
+}

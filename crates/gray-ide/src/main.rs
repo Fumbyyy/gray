@@ -1,5 +1,6 @@
 mod app;
 mod git;
+mod plugins;
 mod provider;
 mod store;
 mod workspace;
@@ -34,6 +35,7 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             app::bind_keys(cx);
+            app::apply_brand(cx);
             let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1440.), px(900.)));
             let opts = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
