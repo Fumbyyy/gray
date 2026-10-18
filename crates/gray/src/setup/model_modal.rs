@@ -227,10 +227,11 @@ pub(crate) fn effort_chip(eff: &str, config: &Config) -> String {
 pub(crate) fn canonical_model_rows(config: &Config) -> Vec<(String, String)> {
     let (_, list_key, plugin) = picker_scope(config);
     let known = saved_models_for(&list_key, &config.base_url);
-    let stale_variant = config
-        .model
-        .as_deref()
-        .is_some_and(|m| effort_variant_shape(m).is_some() && !known.iter().any(|(id, _)| id == m));
+    let stale_variant = config.model.as_deref().is_some_and(|m| {
+        effort_variant_shape(m).is_some()
+            && !known.iter().any(|(id, _)| id == m)
+            && decompose_model_variant(m, &known).is_none()
+    });
     match (stale_variant, plugin) {
         (true, Some(installed)) => {
             let live = super::context::fetch_plugin_provider_models(installed);

@@ -182,7 +182,7 @@ pub async fn fetch_models_for_config(config: &Config) -> Vec<(String, String)> {
     let Some(installed) = resolve_provider_connection(config, &home) else {
         return Vec::new();
     };
-    let Ok(runtime) = ProviderRuntime::start(installed.clone()).await else {
+    let Ok(runtime) = shared_runtime(installed.clone()).await else {
         return Vec::new();
     };
 
