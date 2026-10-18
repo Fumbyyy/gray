@@ -503,14 +503,21 @@ pub fn fetch_live_provider_models(base_url: &str, api_key: Option<&str>) -> Vec<
     });
 
     let Ok(home) = crate::setup::catalog::gray_home() else {
-        return live;
+        let rows: Vec<crate::setup::variants::CachedRow> = live
+            .into_iter()
+            .map(|(id, name)| crate::setup::variants::CachedRow::Pair(id, name))
+            .collect();
+        for row in &rows {
+            row.register();
+        }
+        return rows.iter().map(|r| r.pair()).collect();
     };
     let list_key = crate::setup::catalog::normalize_custom_base_url(base_url);
     let mut rows: Vec<crate::setup::variants::CachedRow> = live
         .into_iter()
         .map(|(id, name)| crate::setup::variants::CachedRow::Pair(id, name))
         .collect();
-    crate::fusion::extend_with_fusion(&home, &list_key, &mut rows);
+    crate::setup::composite_rows::extend_with_composites(&home, &list_key, &mut rows);
     for row in &rows {
         row.register();
     }
@@ -609,7 +616,7 @@ async fn plugin_models_rpc(
 
     let mut rows = rows;
     if let Ok(home) = crate::setup::catalog::gray_home() {
-        crate::fusion::extend_with_fusion(&home, &list_key, &mut rows);
+        crate::setup::composite_rows::extend_with_composites(&home, &list_key, &mut rows);
     }
     if let Some(last) = rows.last() {
         last.register();
@@ -1025,7 +1032,7 @@ pub(crate) fn load_provider_model_list(base_url: &str) -> Vec<(String, String)> 
     };
     let mut rows = load_provider_model_rows_at(&home, base_url);
     let base = crate::setup::catalog::normalize_custom_base_url(base_url);
-    crate::fusion::extend_with_fusion(&home, &base, &mut rows);
+    crate::setup::composite_rows::extend_with_composites(&home, &base, &mut rows);
     for row in &rows {
         row.register();
     }

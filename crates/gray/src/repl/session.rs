@@ -2,6 +2,27 @@ use super::*;
 
 static EXIT_SESSION: StdMutex<Option<String>> = StdMutex::new(None);
 
+static RESUME_TRAILER: StdMutex<Option<String>> = StdMutex::new(None);
+
+pub(crate) fn note_resume_trailer(id: &str) {
+    *RESUME_TRAILER.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
+}
+
+pub(crate) fn clear_resume_trailer() {
+    *RESUME_TRAILER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn resume_trailer_fresh(session_state: &Option<SessionState>) -> bool {
+    let Some(state) = session_state else {
+        return false;
+    };
+    RESUME_TRAILER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        == Some(state.session_id.as_str())
+}
+
 static EXIT_HINT_PRINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn claim_exit_hint() -> bool {
@@ -93,7 +114,10 @@ pub(crate) async fn handle_resume(
     }
     if args.target.is_none() {
         let at_home = tui.is_some_and(|s| s.lock().expect("tui lock").is_home());
-        if !at_home && let Some(line) = current_session_line(session_state) {
+        if !at_home
+            && !resume_trailer_fresh(session_state)
+            && let Some(line) = current_session_line(session_state)
+        {
             say(tui, &line);
         }
     }
@@ -190,7 +214,15 @@ pub(crate) async fn handle_resume(
         }
         return;
     } else {
-        let result = with_modal(tui, crate::resume::run_resume_picker(args.all, bg.as_ref())).await;
+        let result = with_modal(
+            tui,
+            crate::resume::run_resume_picker(
+                args.all,
+                bg.as_ref(),
+                session_state.as_ref().map(|s| s.session_id.clone()),
+            ),
+        )
+        .await;
         match result {
             Ok(Some(id)) => Some(id),
             Ok(None) => {
@@ -297,6 +329,7 @@ pub(crate) async fn handle_resume(
                         let (tool_labels, tool_previews) = tool_display_maps(
                             agent.as_ref().map(|a| a.tool_defs()).unwrap_or_default(),
                         );
+                        note_resume_trailer(sid.as_str());
                         t.replay_session_history_with_tools(
                             shared_history,
                             cwd,
@@ -658,13 +691,23 @@ pub(crate) fn dispatch_agent_event(
                     .map(|(n, a)| (if n.is_empty() { "tool".to_string() } else { n }, a))
                     .unwrap_or_else(|| ("tool".to_string(), None));
                 {
-                    let lines = crate::tool_fmt::format_tool_result_lines_with_context(
+                    let mut lines = crate::tool_fmt::format_tool_result_lines_with_context(
                         &name,
                         args.as_ref(),
                         output,
                         *is_error,
                         Some(cwd),
                     );
+                    if !*is_error
+                        && let Some(rows) = crate::composer::transcript::rows::viewed_image_lines(
+                            &name,
+                            args.as_ref(),
+                            cwd,
+                            t.width(),
+                        )
+                    {
+                        lines.extend(rows);
+                    }
 
                     t.atomic(|t| {
                         t.remove_live_tool(id);

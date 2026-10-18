@@ -133,7 +133,8 @@ pub struct SavedConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub effort_memory: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub qol: Option<bool>,
+    #[serde(alias = "qol")]
+    pub quality_of_life: Option<bool>,
 }
 
 pub const AUTH_MODE_API_KEY: &str = "api_key";
@@ -189,12 +190,12 @@ pub fn auto_update_enabled() -> bool {
     subsystem_enabled(|s| s.auto_update)
 }
 
-pub fn qol_enabled() -> bool {
-    subsystem_enabled(|s| s.qol)
+pub fn quality_of_life_enabled() -> bool {
+    subsystem_enabled(|s| s.quality_of_life)
 }
 
-pub fn qol_enabled_at(path: &Path) -> bool {
-    subsystem_enabled_at(path, |s| s.qol)
+pub fn quality_of_life_enabled_at(path: &Path) -> bool {
+    subsystem_enabled_at(path, |s| s.quality_of_life)
 }
 
 pub fn auto_update_enabled_at(path: &Path) -> bool {
@@ -278,7 +279,7 @@ fn partial_saved_config(obj: &serde_json::Map<String, serde_json::Value>) -> Sav
         credential_source: string_field(obj, "credential_source"),
         auth_ref: string_field(obj, "auth_ref"),
         effort_memory: opt_field(obj, "effort_memory").unwrap_or_default(),
-        qol: opt_field(obj, "qol"),
+        quality_of_life: opt_field(obj, "quality_of_life").or_else(|| opt_field(obj, "qol")),
     }
 }
 

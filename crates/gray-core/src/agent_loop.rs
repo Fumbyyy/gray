@@ -291,6 +291,13 @@ impl Agent {
         self.run_inner(ctx, Some(on_event)).await
     }
 
+    fn bill_tool_usage(billed: &mut Usage, name: &str, output: &ToolOutput, session: Option<&str>) {
+        if let Some(u) = output.usage.as_deref().filter(|u| u.any()) {
+            billed.accumulate(u);
+            u.log_request(&format!("tool:{name}"), session);
+        }
+    }
+
     async fn apply_tool_after(&self, name: &str, output: &ToolOutput) -> ToolOutput {
         let mut output = output.clone();
         for hook in &self.hooks {
@@ -553,12 +560,17 @@ impl Agent {
                 hint.prompt_tokens = self.estimate_tokens();
                 hint.cache_reported = self.warm_cache_reported;
             }
-            if self.cache_warm.is_some() {
-                if let Some(prev) = self.warm_run.take()
-                    && let Ok(spent) = prev.spent.lock()
-                {
-                    billed.accumulate(&spent);
-                }
+            let warm_off = self
+                .warm_hint
+                .lock()
+                .map(|hint| hint.warm_off)
+                .unwrap_or(false);
+            if let Some(prev) = self.warm_run.take()
+                && let Ok(spent) = prev.spent.lock()
+            {
+                billed.accumulate(&spent);
+            }
+            if self.cache_warm.is_some() && !warm_off {
                 let warm_spent = std::sync::Arc::new(std::sync::Mutex::new(Usage::default()));
                 let phase = crate::cache_warm::warm_phase();
                 self.warm_run = Some(crate::cache_warm::ActiveWarm {
@@ -644,7 +656,10 @@ impl Agent {
                                     turn_retry_detail(&e, turn_retries)
                                 ));
                                 if !delay.is_zero() {
-                                    tokio::time::sleep(delay).await;
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(delay) => {}
+                                        _ = ctx.cancel.cancelled() => {}
+                                    }
                                 }
                                 if ctx.cancel.is_cancelled() {
                                     self.emit_turn_end(&billed).await;
@@ -808,7 +823,10 @@ impl Agent {
                                     turn_retry_detail(&e, turn_retries)
                                 ));
                                 if !delay.is_zero() {
-                                    tokio::time::sleep(delay).await;
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(delay) => {}
+                                        _ = ctx.cancel.cancelled() => {}
+                                    }
                                 }
                                 if ctx.cancel.is_cancelled() {
                                     self.emit_turn_end(&billed).await;
@@ -1301,6 +1319,12 @@ impl Agent {
                         match by_idx.get(&idx) {
                             Some(Some(output)) => {
                                 let output = self.apply_tool_after(name, output).await;
+                                Self::bill_tool_usage(
+                                    &mut billed,
+                                    name,
+                                    &output,
+                                    ctx.session_id.as_deref(),
+                                );
                                 for hook in &self.hooks {
                                     hook.post_tool(name, &output).await;
                                 }
@@ -1389,6 +1413,7 @@ impl Agent {
                             Err(_) => ToolOutput::error("cancelled by user"),
                         };
                         let report = self.apply_tool_after(name, &report).await;
+                        Self::bill_tool_usage(&mut billed, name, &report, ctx.session_id.as_deref());
                         for hook in &self.hooks {
                             hook.post_tool(name, &report).await;
                         }
@@ -1413,6 +1438,7 @@ impl Agent {
                     },
                 };
                 let output = self.apply_tool_after(name, &output).await;
+                Self::bill_tool_usage(&mut billed, name, &output, ctx.session_id.as_deref());
                 for hook in &self.hooks {
                     hook.post_tool(name, &output).await;
                 }

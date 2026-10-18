@@ -293,19 +293,40 @@ impl Config {
             .map(|v| v.trim().to_string())
             .unwrap_or_else(|| nonempty(Some(saved.auth_ref.as_str())).unwrap_or_default());
 
-        let model_parts = if model == saved_model && !saved.model_parts.is_empty() {
-            saved.model_parts.clone()
-        } else {
-            model
-                .as_deref()
-                .and_then(|m| {
-                    saved
-                        .parts_memory
-                        .get(&crate::setup::effort_memory_key(&provider_id, &base_url, m))
-                        .cloned()
+        let parse_parts = |raw: &str| -> std::collections::BTreeMap<String, String> {
+            raw.split(',')
+                .filter_map(|kv| {
+                    kv.split_once('=')
+                        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
                 })
-                .unwrap_or_default()
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                .collect()
         };
+        let model_parts = cli
+            .model_parts
+            .as_deref()
+            .map(parse_parts)
+            .filter(|m| !m.is_empty())
+            .or_else(|| {
+                env("GRAY_MODEL_PARTS")
+                    .map(|v| parse_parts(&v))
+                    .filter(|m| !m.is_empty())
+            })
+            .unwrap_or_else(|| {
+                if model == saved_model && !saved.model_parts.is_empty() {
+                    saved.model_parts.clone()
+                } else {
+                    model
+                        .as_deref()
+                        .and_then(|m| {
+                            saved
+                                .parts_memory
+                                .get(&crate::setup::effort_memory_key(&provider_id, &base_url, m))
+                                .cloned()
+                        })
+                        .unwrap_or_default()
+                }
+            });
 
         let config = Self {
             model,

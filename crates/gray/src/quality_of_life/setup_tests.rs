@@ -152,7 +152,7 @@ fn creds_roundtrip_store_then_undo_on_fingerprint() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), ".env", "OPENROUTER_API_KEY=sk-test\n");
     let store = CredentialStore::new(dir.path().join("auth.json"));
-    let mut state = crate::qol::QolState::default();
+    let mut state = crate::quality_of_life::State::default();
     let entries = vec![CredItem {
         target: "openrouter".into(),
         src: dir.path().join(".env"),
@@ -196,7 +196,7 @@ fn creds_apply_never_overwrites_existing_keys() {
     let mut map = BTreeMap::new();
     map.insert("k".into(), AuthEntry::Key("old-value".into()));
     store.replace(&map).unwrap();
-    let mut state = crate::qol::QolState::default();
+    let mut state = crate::quality_of_life::State::default();
     let entries = vec![CredItem {
         target: "k".into(),
         src: dir.path().join(".env"),

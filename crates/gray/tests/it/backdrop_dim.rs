@@ -17,7 +17,7 @@ fn draw_bg(w: u16, h: u16) -> ratatui::buffer::Buffer {
         home_notice: None,
         plugin_stats: None,
         home_update: None,
-        home_qol: None,
+        home_quality_of_life: None,
         home_session: None,
         attachments: Vec::new(),
     };

@@ -316,7 +316,7 @@ pub struct Tui {
     pub(crate) plugin_stats: Option<String>,
 
     pub(crate) home_update: Option<String>,
-    pub(crate) home_qol: Option<String>,
+    pub(crate) home_quality_of_life: Option<String>,
 
     pub(crate) home_session: Option<String>,
 
@@ -746,6 +746,7 @@ fn intro_stage(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) -> Opt
         w as u16,
         (h - start) as u16,
     ));
+    terminal.reset_gap();
 
     for _ in 0..64 {
         match crossterm::event::poll(Duration::ZERO) {
@@ -918,7 +919,7 @@ impl Tui {
             home_notice: None,
             plugin_stats: None,
             home_update: None,
-            home_qol: None,
+            home_quality_of_life: None,
             home_session: None,
             left_home: false,
             intro_started: intro,
@@ -1091,8 +1092,9 @@ impl Tui {
                     self.record_rows(lines.clone());
                     self.insert_paragraph(&lines, Some(crate::theme::theme().window_bg));
                 }
-                TranscriptEntry::UserPrompt(text, _) => {
-                    let lines = crate::composer::transcript::format_user_prompt_lines(text, w);
+                TranscriptEntry::UserPrompt(text, attached) => {
+                    let lines =
+                        crate::composer::transcript::format_user_prompt_lines(text, attached, w);
                     self.emit_rows(lines, Some(crate::theme::theme().surface_bg));
                 }
                 TranscriptEntry::ToolBox { header, body } => {
@@ -1171,8 +1173,8 @@ impl Tui {
         self.plugin_stats = stats;
     }
 
-    pub fn set_home_qol(&mut self, line: Option<String>) {
-        self.home_qol = line;
+    pub fn set_home_quality_of_life(&mut self, line: Option<String>) {
+        self.home_quality_of_life = line;
     }
 
     pub fn set_home_update(&mut self, notice: Option<String>) {
@@ -1713,7 +1715,7 @@ impl Tui {
             home_notice: self.home_notice.clone(),
             plugin_stats: self.plugin_stats.clone(),
             home_update: self.home_update.clone(),
-            home_qol: self.home_qol.clone(),
+            home_quality_of_life: self.home_quality_of_life.clone(),
             home_session: self.home_session.clone(),
             attachments: self.attachments.clone(),
         }

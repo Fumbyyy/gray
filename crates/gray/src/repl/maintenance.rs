@@ -5,7 +5,7 @@ const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500
 pub(crate) async fn handle_update(tui: &TuiOpt, arg: Option<String>) {
     let shared = tui.as_ref().map(|(s, _)| s);
     if arg.as_deref().map(str::trim) == Some("everything") {
-        crate::qol::update::handle(tui).await;
+        crate::quality_of_life::update::handle(tui).await;
         return;
     }
     if let Some(rest) = arg.as_deref().map(str::trim)

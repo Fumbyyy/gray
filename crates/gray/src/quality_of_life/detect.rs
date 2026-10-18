@@ -52,7 +52,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         bins: &["claude"],
         rules: Some(".claude/CLAUDE.md"),
         skills: Some(".claude/skills"),
-        plugin: Some("claude-sub"),
+        plugin: Some("claude"),
         mcp: Some(McpSource::ClaudeJson(".claude.json")),
         creds: None,
         stale_probe: None,
@@ -65,7 +65,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         bins: &["codex"],
         rules: Some(".codex/AGENTS.md"),
         skills: Some(".codex/skills"),
-        plugin: Some("codex-sub"),
+        plugin: Some("codex"),
         mcp: None,
         creds: None,
         stale_probe: None,
@@ -78,7 +78,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         bins: &["opencode"],
         rules: Some(".config/opencode/AGENTS.md"),
         skills: Some(".config/opencode/skills"),
-        plugin: Some("opencode-sub"),
+        plugin: Some("opencode"),
         mcp: Some(McpSource::Opencode(".config/opencode/opencode.json")),
         creds: None,
         stale_probe: None,
@@ -91,7 +91,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         bins: &["devin"],
         rules: None,
         skills: Some(".config/devin/skills"),
-        plugin: Some("devin-sub"),
+        plugin: Some("devin"),
         mcp: None,
         creds: None,
         stale_probe: None,
@@ -159,7 +159,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         bins: &["hermes"],
         rules: Some(".hermes/SOUL.md"),
         skills: Some(".hermes/skills"),
-        plugin: None,
+        plugin: Some("nous"),
         mcp: None,
         creds: Some(&[
             CredSource::HermesAuth(".hermes/auth.json"),
@@ -274,7 +274,7 @@ pub(crate) async fn run_for_home(tui: crate::composer::SharedTui) {
     let _ = super::save_state(&state);
     if let Ok(mut t) = tui.lock() {
         if t.is_home() {
-            t.set_home_qol(Some(line));
+            t.set_home_quality_of_life(Some(line));
         } else {
             t.push_dim(line);
             t.ensure_gap();

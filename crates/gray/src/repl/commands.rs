@@ -401,7 +401,7 @@ pub(crate) fn complete_command_args(
                 ("scanned", "show the declared scan set"),
             ];
             table.extend(
-                crate::qol::detect::TOOLS
+                crate::quality_of_life::detect::TOOLS
                     .iter()
                     .map(|t| (t.id, "import this tool's setup")),
             );

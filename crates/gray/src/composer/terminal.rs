@@ -53,6 +53,10 @@ where
     pub viewport_area: Rect,
     pub last_known_screen_size: Size,
     scrollback: Scrollback,
+    // Blank rows between the transcript tail and the band top, left by a
+    // grounded shrink. Growth and inserts fill them before scrolling
+    // history so they never reach scrollback.
+    gap: u16,
 }
 
 impl<B> Drop for CustomTerminal<B>
@@ -95,6 +99,7 @@ where
             viewport_area,
             last_known_screen_size: screen_size,
             scrollback,
+            gap: 0,
         };
         term.set_viewport_area(viewport_area);
         term
@@ -104,6 +109,10 @@ where
         self.buffers[self.current].resize(area);
         self.buffers[1 - self.current].resize(area);
         self.viewport_area = area;
+    }
+
+    pub(crate) fn reset_gap(&mut self) {
+        self.gap = 0;
     }
 
     pub fn set_viewport_height(&mut self, height: u16, screen_size: Size) -> io::Result<()> {
@@ -120,22 +129,28 @@ where
         area.y = if grounded { bottom } else { area.y.min(bottom) };
         let wanted_bottom = old.y.saturating_add(area.height);
         if wanted_bottom > screen_size.height && !screen_shrank {
-            let overflow = wanted_bottom - screen_size.height;
-            self.scroll_history_up(old.y, overflow)?;
+            let k = wanted_bottom - screen_size.height;
+            // Growth eats blank gap rows first; only the overflow past the
+            // gap scrolls history, so gap blanks never reach scrollback.
+            if self.gap >= k {
+                self.gap -= k;
+            } else {
+                self.scroll_history_up(old.y - self.gap, k - self.gap)?;
+                self.gap = 0;
+            }
         }
 
-        // Grounded shrink: slide the transcript region down with the band so
-        // the transcript's tail stays flush with the band's new top — the dead
-        // space lands at the top of the screen, not between transcript and
-        // band or below the band.
-        let slid =
-            grounded && !screen_shrank && area.y > old.y && self.scrollback == Scrollback::Regions;
-        if slid {
-            self.scroll_region_down(area.y, area.y - old.y)?;
+        // Grounded shrink: the band re-pins to the bottom, leaving blank
+        // rows between the transcript tail and the new band top. Track
+        // them in `gap` instead of sliding the transcript down — the slide
+        // put the blanks at the screen top, where later scrolls pushed
+        // them into scrollback as tears.
+        if grounded && !screen_shrank && area.y > old.y {
+            self.gap += area.y - old.y;
         }
 
         if area != self.viewport_area {
-            let from = if self.viewport_area.is_empty() || slid {
+            let from = if self.viewport_area.is_empty() {
                 area.y
             } else {
                 area.y.min(self.viewport_area.y)
@@ -143,12 +158,15 @@ where
             self.set_viewport_area(area);
             self.clear_after_position(Position::new(0, from))?;
         }
+        self.gap = self.gap.min(self.viewport_area.y);
         Ok(())
     }
 
     pub fn clear_after_position(&mut self, position: Position) -> io::Result<()> {
-        self.backend.set_cursor_position(position)?;
-        self.backend.clear_region(ClearType::AfterCursor)?;
+        if position.y < self.last_known_screen_size.height {
+            self.backend.set_cursor_position(position)?;
+            self.backend.clear_region(ClearType::AfterCursor)?;
+        }
 
         self.buffers[1 - self.current].reset();
         Ok(())
@@ -166,6 +184,7 @@ where
         Backend::flush(&mut self.backend)?;
         self.last_known_screen_size = screen_size;
         self.set_viewport_area(Rect::new(0, 0, screen_size.width, 0));
+        self.gap = 0;
         self.buffers[1 - self.current].reset();
         Ok(())
     }
@@ -248,6 +267,12 @@ where
         if self.scrollback == Scrollback::Regions {
             let screen_h = self.last_known_screen_size.height;
             let mut area = self.viewport_area;
+            if self.gap > 0 {
+                let k = rows.len().min(usize::from(self.gap));
+                self.draw_rows(area.top() - self.gap, &rows[..k])?;
+                rows = &rows[k..];
+                self.gap -= k as u16;
+            }
             if area.bottom() < screen_h {
                 let shift = rows.len().min(usize::from(screen_h - area.bottom()));
                 if !area.is_empty() {
@@ -285,7 +310,8 @@ where
         let screen_h = self.last_known_screen_size.height;
         let mut area = self.viewport_area;
         self.clear_after_position(Position::new(0, area.top()))?;
-        let mut y = area.top();
+        let mut y = area.top() - self.gap;
+        self.gap = 0;
         while !rows.is_empty() {
             if y >= screen_h {
                 let k = (rows.len() as u16).min(screen_h);
@@ -314,19 +340,6 @@ where
 
         self.clear_after_position(Position::new(0, top))?;
         self.scroll_screen_up(n)
-    }
-
-    fn scroll_region_down(&mut self, bottom: u16, n: u16) -> io::Result<()> {
-        if n == 0 || bottom <= 1 {
-            return Ok(());
-        }
-        write!(self.backend, "\x1b[1;{bottom}r")?;
-        self.backend.set_cursor_position(Position::new(0, 0))?;
-        for _ in 0..n {
-            write!(self.backend, "\x1bM")?;
-        }
-        write!(self.backend, "\x1b[r")?;
-        Ok(())
     }
 
     fn scroll_region_up(&mut self, top: u16, n: u16) -> io::Result<()> {

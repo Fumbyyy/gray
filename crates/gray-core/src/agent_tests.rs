@@ -2367,6 +2367,7 @@ fn tool_output_media_goes_native_or_as_its_fallback() {
         content: "clip.mp4 (video)".into(),
         is_error: false,
         images: Vec::new(),
+        usage: None,
         media: vec![crate::agent::AttachedMedia {
             media_type: "video/mp4".into(),
             data: "VID".into(),
