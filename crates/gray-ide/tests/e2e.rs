@@ -1063,7 +1063,9 @@ fn turn_diff_shows_changes_since_checkpoint() {
         return;
     };
     g.send("write turn.txt hello from the agent");
-    g.wait_for("edit reply", |s| finished(s) && s["messages"].to_string().contains("turn.txt"));
+    g.wait_for("edit reply", |s| {
+        finished(s) && s["messages"].to_string().contains("turn.txt")
+    });
     g.palette("Diff since last turn");
     let s = g.wait_for("turn diff open", |s| {
         s["panel"] == "Diff"
@@ -1075,5 +1077,7 @@ fn turn_diff_shows_changes_since_checkpoint() {
     });
     g.screenshot("turn-diff");
     g.palette("Diff vs HEAD");
-    g.wait_for("head diff", |s| s["diff_base"].is_null() && s["panel"] == "Diff");
+    g.wait_for("head diff", |s| {
+        s["diff_base"].is_null() && s["panel"] == "Diff"
+    });
 }
