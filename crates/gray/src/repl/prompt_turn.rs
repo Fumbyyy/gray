@@ -54,6 +54,7 @@ pub(crate) async fn run_prompt_turn(
     unconfigured: &mut bool,
     resumable: &mut bool,
 ) -> anyhow::Result<()> {
+    super::session::clear_resume_trailer();
     let (shared, _) = if interactive {
         (Some(tui.as_ref().expect("interactive implies tui")), ())
     } else {
