@@ -1096,7 +1096,7 @@ fn turn_diff_shows_changes_since_checkpoint() {
         finished(s) && s["messages"].to_string().contains("turn.txt")
     });
     g.palette("Diff since last turn");
-    let s = g.wait_for("turn diff open", |s| {
+    let _s = g.wait_for("turn diff open", |s| {
         s["panel"] == "Diff"
             && s["diff_base"].is_string()
             && s["diff_files"]
