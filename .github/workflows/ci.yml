@@ -262,6 +262,34 @@ jobs:
         shell: powershell
         run: ./dist/tests/install-native.ps1 -Binary (Resolve-Path target/debug/gray.exe)
 
+  windows-10-smoke:
+    # The installer now admits builds < 22000 (Windows 10 floor is 10240). No
+    # GitHub-hosted Windows 10 client image exists; windows-2022 is build
+    # 20348, the Windows 10 kernel lineage, so this job exercises the newly
+    # admitted range. A debug binary suffices: the gate being tested is the
+    # installer probing `gray.exe --version` on this OS.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build gray.exe
+        run: cargo build --locked -p gray
+      - name: Smoke test on a < 22000 build
+        run: ./target/debug/gray.exe --version
+      - name: Test native installer with PowerShell 7
+        run: ./dist/tests/install-native.ps1 -Binary (Resolve-Path target/debug/gray.exe)
+      - name: Test native installer with Windows PowerShell 5.1
+        shell: powershell
+        run: ./dist/tests/install-native.ps1 -Binary (Resolve-Path target/debug/gray.exe)
+
   windows-preview:
     # The downloadable native preview ZIP. A job of its own, so the 2-3 minute
     # release build runs beside the runtime gate instead of after it. The ZIP

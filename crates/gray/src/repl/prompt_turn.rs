@@ -93,7 +93,7 @@ pub(crate) async fn run_prompt_turn(
                             true,
                         );
                     } else {
-                        println!("provider error: {e}");
+                        say(None, &format!("provider error: {e}"));
                     }
                     return Ok(());
                 }
@@ -135,7 +135,7 @@ pub(crate) async fn run_prompt_turn(
                         let _ = t.draw();
                     }
                 } else {
-                    println!("{e}");
+                    say(None, &format!("{e}"));
                 }
                 return Ok(());
             }
@@ -148,7 +148,8 @@ pub(crate) async fn run_prompt_turn(
             .as_ref()
             .map(|s| s.session_id.as_str().to_string());
         ag.set_steer(std::sync::Arc::new(move || {
-            steer_queued_input(steer_tui.as_ref())
+            crate::ide::steer_source()
+                .or_else(|| steer_queued_input(steer_tui.as_ref()))
                 .or_else(|| steer_direct_send(steer_tui.as_ref(), steer_sid.as_deref()))
         }));
         let out_tui = tui_stream.clone();
@@ -237,13 +238,20 @@ pub(crate) async fn run_prompt_turn(
             hooks: agent.hooks().to_vec(),
         }
     });
-    let key_watcher = key_watcher::spawn_key_watcher_with_typing(
-        watch_cancel,
-        watcher_stopped,
-        watcher_tui,
-        cwd_for_watcher,
-        turn_locals,
-    );
+    let key_watcher = if crate::ide::tap_active() {
+        // A host (the IDE) cancels via cancel_turn() and has no terminal —
+        // watching crossterm keys would write enhancement escapes to stdout
+        // and let keys in an attached console interrupt the turn.
+        tokio::task::spawn(async {})
+    } else {
+        key_watcher::spawn_key_watcher_with_typing(
+            watch_cancel,
+            watcher_stopped,
+            watcher_tui,
+            cwd_for_watcher,
+            turn_locals,
+        )
+    };
 
     let mut pending_tools: HashMap<String, (String, Option<serde_json::Value>)> = HashMap::new();
     let mut turn_usage: Option<gray_core::event::Usage> = None;
@@ -318,6 +326,7 @@ pub(crate) async fn run_prompt_turn(
         .unwrap_or_else(|| config.model.clone().unwrap_or_default());
     let mut run_result = {
         let mut on_event = |ev: &AgentEvent| {
+            crate::ide::tap_agent_event(ev);
             dispatch_agent_event(
                 ev,
                 tui_stream.as_ref(),
@@ -403,6 +412,7 @@ pub(crate) async fn run_prompt_turn(
                 .map(|s| s.session_id.as_str().to_string()),
         };
         let mut on_event2 = |ev: &AgentEvent| {
+            crate::ide::tap_agent_event(ev);
             dispatch_agent_event(
                 ev,
                 tui_stream.as_ref(),
@@ -491,7 +501,14 @@ pub(crate) async fn run_prompt_turn(
                     t.push_dim(INTERRUPTED_NOTICE.to_string());
                 }
             } else {
-                println!("(interrupted — press Enter to continue)");
+                say(
+                    None,
+                    if crate::ide::sink_active() {
+                        "(interrupted)"
+                    } else {
+                        "(interrupted — press Enter to continue)"
+                    },
+                );
             }
         }
         Err(e) => {
@@ -546,10 +563,15 @@ pub(crate) async fn run_prompt_turn(
                         super::cron::push_notice(&mut t, "API key reloaded", RELOADED, false);
                     }
                 }
-            } else {
-                eprintln!("{msg}\n(press Enter to continue)");
+            } else if crate::ide::sink_active() {
+                say_err(None, &msg);
                 if reloaded {
-                    eprintln!("{RELOADED}");
+                    say_err(None, RELOADED);
+                }
+            } else {
+                say_err(None, &format!("{msg}\n(press Enter to continue)"));
+                if reloaded {
+                    say_err(None, RELOADED);
                 }
             }
         }

@@ -168,10 +168,15 @@ pub(crate) fn live_tool_rows(
             let mut headers = t.header.clone();
 
             if let Some(line) = headers.first_mut().filter(|_| t.running) {
-                let prefix =
-                    usize::from(line.spans.first().is_some_and(|s| s.content == "\u{2b22} "));
+                let filled = format!("{} ", crate::tui::glyph("\u{2b22}", "#"));
+                let prefix = usize::from(
+                    line.spans
+                        .first()
+                        .is_some_and(|s| s.content == filled.as_str()),
+                );
                 if prefix == 1 {
-                    line.spans[0].content = "\u{2b21} ".into();
+                    line.spans[0].content =
+                        format!("{} ", crate::tui::glyph("\u{2b21}", "o")).into();
                 }
 
                 let live = line
@@ -524,11 +529,24 @@ fn dots_braille(dots: &std::collections::BTreeSet<(usize, usize)>) -> Vec<String
 
 fn intro_settle_frames(from: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
     let (cx, cy) = MARK_CELLS;
-    let mut target: Vec<String> = crate::tui::LOGO
+    let safe = crate::tui::unicode_safe();
+    let src = if safe {
+        crate::tui::LOGO
+    } else {
+        crate::tui::LOGO_ASCII
+    };
+    let blank = if safe { '\u{2800}' } else { ' ' };
+    let mut target: Vec<String> = src
         .lines()
-        .map(|l| format!("{l:\u{2800}<cx$}"))
+        .map(|l| {
+            let mut s = l.to_string();
+            while s.chars().count() < cx {
+                s.push(blank);
+            }
+            s
+        })
         .collect();
-    target.resize(cy, "\u{2800}".repeat(cx));
+    target.resize(cy, blank.to_string().repeat(cx));
     let want = braille_dots(&target);
     let mut ink = braille_dots(from);
     if ink.difference(&want).next().is_some() {
@@ -670,13 +688,17 @@ pub(crate) fn welcome_body_lines_at(
             Style::default().bold().fg(theme.text_bright),
         )],
     };
+    let safe = crate::tui::unicode_safe();
     title.push(Span::raw(" "));
-    title.push(Span::styled(
-        "\u{25c6}",
-        Style::default().fg(theme.text_muted),
-    ));
-    title.push(Span::raw(" "));
-    let title_w = display_width("gray \u{25c6} ") + display_width(&version);
+    if safe {
+        title.push(Span::styled(
+            "\u{25c6}",
+            Style::default().fg(theme.text_muted),
+        ));
+        title.push(Span::raw(" "));
+    }
+    let title_w =
+        display_width(if safe { "gray \u{25c6} " } else { "gray " }) + display_width(&version);
     title.push(Span::styled(version, Style::default().fg(theme.text_muted)));
     body.push(centered(title, title_w));
     body.push(Line::from(""));

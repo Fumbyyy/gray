@@ -165,7 +165,7 @@ fn tool_name_line(name: &str, label: Option<&str>) -> Line<'static> {
     };
     Line::from(vec![
         Span::styled(
-            "\u{2b22} ",
+            format!("{} ", crate::tui::glyph("\u{2b22}", "#")),
             Style::default().fg(hue).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -587,7 +587,7 @@ pub fn format_tool_call_lines(
     preview_path: Option<&str>,
 ) -> Vec<Line<'static>> {
     let bullet = Span::styled(
-        "\u{2b22} ",
+        format!("{} ", crate::tui::glyph("\u{2b22}", "#")),
         Style::default()
             .fg(tool_hue(name))
             .add_modifier(Modifier::BOLD),
