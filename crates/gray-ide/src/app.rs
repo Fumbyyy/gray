@@ -2788,7 +2788,7 @@ fn background_layer(bg: &str) -> Div {
         }
         .w_full()
         .h_full()
-        .opacity(0.16)
+        .opacity(0.3)
         .grayscale(true),
     )
 }

@@ -857,7 +857,7 @@ fn background_wallpaper_renders_and_persists() {
     g.wait_for("background set", |s| s["background"] == "andromeda");
     let shot = g.screenshot("bg-andromeda");
     assert!(
-        max_pixel(&shot, 700, 300, 200, 150) > 25,
+        max_pixel(&shot, 700, 300, 200, 150) > 45,
         "dithered wallpaper not visible"
     );
     g.restart();
