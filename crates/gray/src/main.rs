@@ -388,7 +388,7 @@ async fn run_resume_subcommand(
             }
             return Ok(());
         }
-        match gray::resume::run_resume_picker(all, None).await? {
+        match gray::resume::run_resume_picker(all, None, None).await? {
             Some(id) => id,
             None => return Ok(()),
         }
