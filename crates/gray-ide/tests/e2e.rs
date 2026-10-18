@@ -175,13 +175,19 @@ impl Gray {
     }
 
     fn xdo(&self, args: &[&str]) {
-        let ok = Command::new("xdotool")
-            .args(args)
-            .env("DISPLAY", &self.display)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        assert!(ok, "xdotool {args:?} failed");
+        for _ in 0..10 {
+            let ok = Command::new("xdotool")
+                .args(args)
+                .env("DISPLAY", &self.display)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                return;
+            }
+            sleep(Duration::from_millis(200));
+        }
+        panic!("xdotool {args:?} failed");
     }
 
     fn key(&self, k: &str) {
@@ -206,16 +212,64 @@ impl Gray {
             .map(|o| {
                 for w in String::from_utf8_lossy(&o.stdout).lines() {
                     let _ = Command::new("xdotool")
-                        .args(["windowactivate", "--sync", w])
+                        .args(["windowfocus", "--sync", w])
                         .env("DISPLAY", &self.display)
                         .status();
                 }
             });
     }
 
+    fn click_composer(&self) {
+        let pid = self.app.as_ref().map(|c| c.id()).unwrap_or(0);
+        if pid == 0 {
+            return;
+        }
+        let wids = Command::new("xdotool")
+            .args(["search", "--pid", &pid.to_string()])
+            .env("DISPLAY", &self.display)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let Some(wid) = wids.lines().next() else {
+            return;
+        };
+        let geo = Command::new("xdotool")
+            .args(["getwindowgeometry", "--shell", wid])
+            .env("DISPLAY", &self.display)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let (mut w, mut h) = (0i64, 0i64);
+        for l in geo.lines() {
+            if let Some(v) = l.strip_prefix("WIDTH=") {
+                w = v.parse().unwrap_or(0);
+            }
+            if let Some(v) = l.strip_prefix("HEIGHT=") {
+                h = v.parse().unwrap_or(0);
+            }
+        }
+        if w == 0 || h == 0 {
+            return;
+        }
+        let x = (w / 2).to_string();
+        let y = ((h as f64) * 0.82) as i64;
+        self.xdo(&[
+            "mousemove",
+            "--window",
+            wid,
+            &x,
+            &y.to_string(),
+            "click",
+            "1",
+        ]);
+    }
+
     fn send(&self, text: &str) {
-        self.focus_window();
-        for _ in 0..30 {
+        for i in 0..30 {
+            self.focus_window();
+            if i == 5 || i == 15 {
+                self.click_composer();
+            }
             self.type_text(text);
             if self.state()["composer"] == text {
                 break;
