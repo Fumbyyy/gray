@@ -21,6 +21,10 @@
   Windows API gray uses predates it. A windows-2022 CI leg runs the
   installer suite as sub-22000 evidence; GitHub hosts no Windows 10
   client runner.
+- **Fusion moved out of core into the `gray-fusion` plugin** (`gray
+  plugin install fusion`). The lead + persistent-sidekick `handoff`
+  pair, the folded Fusion model row, and provider pairings ship as a
+  plugin now, and it's opt-in rather than in the default install set.
 
 ## [0.2.2] - 2026-10-17
 

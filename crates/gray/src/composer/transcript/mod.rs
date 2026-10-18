@@ -539,6 +539,47 @@ impl Tui {
     }
 }
 
+/// Marker that opens a synthetic user message carrying a background-task
+/// notification to the model. Stored in the session like any user message,
+/// but replayed as a compact dim line instead of a prompt block.
+pub(crate) const BG_NOTICE_MARKER: &str = "[Background task notification]";
+
+/// Marker that opens a synthetic user message carrying a cron delivery.
+pub(crate) const CRON_DELIVERY_MARKER: &str = "[Cron delivery: ";
+
+fn is_notice_marker(line: &str) -> bool {
+    line.starts_with(BG_NOTICE_MARKER) || line.starts_with(CRON_DELIVERY_MARKER)
+}
+
+/// Split a stored user prompt into the part worth replaying as a prompt
+/// block and one-line summaries of any injected-notification segments.
+/// `↳ from` session sends stay visible — they carry real user text.
+pub(crate) fn split_synthetic_prompt(text: &str) -> (String, Vec<String>) {
+    let mut visible: Vec<&str> = Vec::new();
+    let mut notices: Vec<String> = Vec::new();
+    let mut in_notice = false;
+    let mut captured = false;
+    for line in text.lines() {
+        if is_notice_marker(line) {
+            in_notice = true;
+            captured = false;
+            continue;
+        }
+        if line.starts_with(crate::session_send::SEND_FROM_PREFIX) {
+            in_notice = false;
+        }
+        if in_notice {
+            if !captured && !line.trim().is_empty() {
+                notices.push(line.trim().to_string());
+                captured = true;
+            }
+        } else {
+            visible.push(line);
+        }
+    }
+    (visible.join("\n").trim_end().to_string(), notices)
+}
+
 #[path = "mod_tests.rs"]
 #[cfg(test)]
 mod tests;

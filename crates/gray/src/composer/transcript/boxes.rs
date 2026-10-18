@@ -411,10 +411,15 @@ impl Tui {
                             .iter()
                             .any(|b| matches!(b, gray_core::ContentBlock::Text { .. }));
                     if !user_text.is_empty() || !attached.is_empty() {
-                        self.push_user_prompt(&user_text, &attached, true);
-
-                        if typed {
-                            self.history.push(user_text.clone());
+                        let (visible, notices) = super::split_synthetic_prompt(&user_text);
+                        if !visible.is_empty() || !attached.is_empty() {
+                            self.push_user_prompt(&visible, &attached, true);
+                        }
+                        for notice in notices {
+                            self.push_dim(format!("\u{2b22} {notice}"));
+                        }
+                        if typed && !visible.is_empty() {
+                            self.history.push(visible);
                             if self.history.len() > 100 {
                                 self.history.remove(0);
                             }

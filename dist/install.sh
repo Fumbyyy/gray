@@ -85,12 +85,12 @@ echo "→ installed to ${DEST}/gray (${INSTALLED_VER:-?}, ${CHANNEL})"
 FLAVOR="core"
 if [ "${GRAY_INSTALL_PLUGINS:-1}" != "0" ]; then
     FLAVOR="full"
-    PLUGINS="${GRAY_PLUGINS:-account memory search questions subagents mcp gateway}"
+    PLUGINS="${GRAY_PLUGINS:-account memory search questions subagents mcp qol hands gateway}"
     FAILED=""
     set -f
     for plugin in $PLUGINS; do
         if "${DEST}/gray" plugin install --yes "$plugin" >/dev/null 2>&1; then
-            echo "→ installed gray-${plugin}"
+            echo "→ installed ${plugin}"
         else
             FAILED="${FAILED} ${plugin}"
         fi

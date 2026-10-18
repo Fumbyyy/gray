@@ -11,7 +11,7 @@
 //! Cell pixel size comes from a CSI-16-t query on /dev/tty (cached once);
 //! `GRAY_CELL_PX=WxH` overrides it when the probe loses the stdin race.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -440,30 +440,68 @@ fn transmitted() -> &'static Mutex<HashSet<(PathBuf, u32, u32)>> {
     SET.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Queued image uploads. APC chunks must never interleave with frame bytes:
+/// backends emit escapes as fmt-piece writes (a MoveTo is several write()
+/// calls), so a transmit mid-frame tears a CSI — orphaning text like `;1H`
+/// and eating the following output into a void. Drained between frames by
+/// [`flush_transmits`].
+type PendingTx = (u32, Vec<u8>, u32, u32, u32, u32);
+
+fn pending() -> &'static Mutex<VecDeque<PendingTx>> {
+    static P: OnceLock<Mutex<VecDeque<PendingTx>>> = OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
 /// Transmit raw RGBA as a kitty virtual placement: `a=T` stores and displays,
 /// `U=1` keeps it virtual so only the unicode-placeholder cells render it.
 fn transmit(id: u32, rgba: &[u8], w: u32, h: u32, cols: u32, rows: u32) -> std::io::Result<()> {
+    pending()
+        .lock()
+        .map_err(|_| std::io::Error::other("pending lock"))?
+        .push_back((id, rgba.to_vec(), w, h, cols, rows));
+    Ok(())
+}
+
+/// Write all queued uploads as contiguous APC chunks under one stdout lock.
+/// Called from `CustomTerminal::draw` after the frame flush, on the TUI
+/// thread, so chunks can only ever sit between complete frames.
+pub(crate) fn flush_transmits() {
+    let Ok(mut q) = pending().lock() else {
+        return;
+    };
+    if q.is_empty() {
+        return;
+    }
     let mut out = std::io::stdout().lock();
     const RAW_CHUNK: usize = 3072; // 4096 base64 chars
-    let n = rgba.len().div_ceil(RAW_CHUNK);
-    for (i, chunk) in rgba.chunks(RAW_CHUNK).enumerate() {
-        let more = u8::from(i + 1 < n);
-        if i == 0 {
-            write!(
-                out,
-                "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={w},v={h},c={cols},r={rows},m={more};"
-            )?;
-        } else {
-            write!(out, "\x1b_Gq=2,m={more};")?;
+    while let Some((id, rgba, w, h, cols, rows)) = q.pop_front() {
+        let n = rgba.len().div_ceil(RAW_CHUNK);
+        for (i, chunk) in rgba.chunks(RAW_CHUNK).enumerate() {
+            let more = u8::from(i + 1 < n);
+            let head = if i == 0 {
+                write!(
+                    out,
+                    "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={w},v={h},c={cols},r={rows},m={more};"
+                )
+            } else {
+                write!(out, "\x1b_Gq=2,m={more};")
+            };
+            let wrote = head
+                .and_then(|_| {
+                    out.write_all(
+                        base64::engine::general_purpose::STANDARD
+                            .encode(chunk)
+                            .as_bytes(),
+                    )
+                })
+                .and_then(|_| out.write_all(b"\x1b\\"));
+            if wrote.is_err() {
+                q.clear();
+                return;
+            }
         }
-        out.write_all(
-            base64::engine::general_purpose::STANDARD
-                .encode(chunk)
-                .as_bytes(),
-        )?;
-        out.write_all(b"\x1b\\")?;
     }
-    out.flush()
+    let _ = out.flush();
 }
 
 fn trim_transparent_margins(img: image::DynamicImage) -> Option<image::DynamicImage> {

@@ -23,8 +23,10 @@ pub struct SendMsg {
     pub attachments: Vec<PathBuf>,
 }
 
+pub(crate) const SEND_FROM_PREFIX: &str = "↳ from ";
+
 pub fn prompt_for(from: &str, text: &str) -> String {
-    format!("↳ from {from}\n{text}")
+    format!("{SEND_FROM_PREFIX}{from}\n{text}")
 }
 
 pub fn default_label() -> String {

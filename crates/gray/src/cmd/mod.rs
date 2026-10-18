@@ -457,14 +457,14 @@ fn composite_name(
 }
 
 fn model_list_for(config: &Config) -> Vec<(String, String)> {
-    let (_, rows) = crate::setup::provider_models_for_config(config);
-    if !rows.is_empty() {
-        return rows;
-    }
     let (_, list_key, _) = crate::setup::picker_scope(config);
     let cached = crate::setup::saved_models_for(&list_key, &config.base_url);
     if !cached.is_empty() {
         return cached;
+    }
+    let (_, rows) = crate::setup::provider_models_for_config(config);
+    if !rows.is_empty() {
+        return rows;
     }
     config
         .model

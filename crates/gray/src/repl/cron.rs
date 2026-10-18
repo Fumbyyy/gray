@@ -347,7 +347,10 @@ pub(crate) fn idle_wake(
                 None => WakeCard::Text(notice.lines().next().unwrap_or_default().to_string()),
             });
 
-            prompts.push(format!("[Background task notification]\n{notice}"));
+            prompts.push(format!(
+                "{}\n{notice}",
+                crate::composer::transcript::BG_NOTICE_MARKER
+            ));
         }
     }
     (!prompts.is_empty()).then(|| (cards, prompts.join("\n\n"), sends))
