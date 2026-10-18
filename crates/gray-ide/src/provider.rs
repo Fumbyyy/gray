@@ -101,6 +101,7 @@ pub struct TurnRequest {
     pub prompt: String,
     pub cwd: PathBuf,
     pub session: Option<String>,
+    pub effort: String,
 }
 
 pub fn start(req: TurnRequest) -> Turn {
@@ -139,6 +140,9 @@ fn gray_command(req: &TurnRequest) -> Command {
     if let Some(sid) = &req.session {
         cmd.arg("--session").arg(sid);
     }
+    if !req.effort.is_empty() {
+        cmd.env("GRAY_THINKING_EFFORT", &req.effort);
+    }
     cmd.current_dir(&req.cwd);
     cmd
 }
@@ -172,6 +176,10 @@ fn codex_command(req: &TurnRequest) -> Command {
     cmd.args(["exec", "--json", "--skip-git-repo-check"])
         .args(["--model", &req.model])
         .args(["--sandbox", sandbox]);
+    if !req.effort.is_empty() {
+        cmd.arg("-c")
+            .arg(format!("model_reasoning_effort=\"{}\"", req.effort));
+    }
     if let Some(sid) = &req.session {
         cmd.arg("resume").arg(sid);
     }
@@ -447,6 +455,7 @@ fn run_fake(req: &TurnRequest, tx: &Sender<ProviderEvent>) -> Result<(), String>
         .session
         .clone()
         .unwrap_or_else(|| format!("fake-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+    let effort = req.effort.clone();
     let _ = tx.send(ProviderEvent::Session(session.clone()));
     if prompt.contains("please fail") {
         thread::sleep(delay);
@@ -483,7 +492,7 @@ fn run_fake(req: &TurnRequest, tx: &Sender<ProviderEvent>) -> Result<(), String>
         thread::sleep(Duration::from_secs(5));
     }
     let reply = format!(
-        "Gray fake agent received: **{prompt}**\n\nRunning in `{}` with model `{}` and mode `{}` in session `{session}`.\n\n```rust\nfn main() {{\n    println!(\"hello from gray\");\n}}\n```\n",
+        "Gray fake agent received: **{prompt}**\n\nRunning in `{}` with model `{}` and mode `{}` in session `{session}` at effort `{effort}`.\n\n```rust\nfn main() {{\n    println!(\"hello from gray\");\n}}\n```\n",
         req.cwd
             .file_name()
             .map(|n| n.to_string_lossy().to_string())

@@ -676,3 +676,50 @@ fn real_gray_cli_provider_streams_and_resumes_session() {
             && reqs[1].contains("second question")
     );
 }
+
+#[test]
+fn worktree_threads_run_in_isolated_checkout() {
+    let Some(g) = Gray::start("worktree") else {
+        return;
+    };
+    g.send("/worktree feat-a");
+    let s = g.wait_for("worktree", |s| {
+        s["thread"]["worktree"].is_string() && s["branch"] == "feat-a"
+    });
+    let wt = PathBuf::from(s["thread"]["worktree"].as_str().unwrap());
+    assert!(wt.join("README.md").exists());
+    g.send("write wt.txt from worktree");
+    g.wait_for("edit in worktree", |s| {
+        finished(s)
+            && s["diff_files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == "wt.txt")
+    });
+    assert!(wt.join("wt.txt").exists());
+    assert!(!g.project.join("wt.txt").exists());
+    g.screenshot("worktree");
+}
+
+#[test]
+fn settle_snooze_effort_and_file_mentions() {
+    let Some(g) = Gray::start("triage") else {
+        return;
+    };
+    g.send("hello");
+    g.wait_for("first", finished);
+    g.send("/settle");
+    g.wait_for("settled", |s| s["thread"]["settled"] == true);
+    g.send("/snooze 30");
+    let s = g.wait_for("snoozed", |s| s["thread"]["snoozed"] == true);
+    assert_eq!(s["threads"][0]["snoozed"], true);
+    g.send("/effort high");
+    g.wait_for("effort", |s| s["thread"]["effort"] == "high");
+    g.send("summarize @README.md");
+    let s = g.wait_for("mention reply", |s| finished(s) && messages(s).len() == 4);
+    let msgs = messages(&s);
+    assert_eq!(msgs[2].1, "summarize @README.md");
+    assert!(msgs[3].1.contains("effort `high`"));
+    assert!(msgs[3].1.contains("# demo"));
+}

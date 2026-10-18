@@ -84,6 +84,21 @@ pub fn diff(dir: &Path) -> String {
     text
 }
 
+pub fn worktree_add(root: &Path, dir: &Path, branch: &str) -> Result<(), String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "add", "-b", branch])
+        .arg(dir)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 pub fn checkpoint(dir: &Path) -> Option<String> {
     git(dir, &["add", "-A"])?;
     let tree = git(dir, &["write-tree"])?.trim().to_string();

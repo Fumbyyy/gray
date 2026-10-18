@@ -36,7 +36,8 @@ actions!(
         Dismiss,
         SaveFile,
         StopTurn,
-        FocusComposer
+        FocusComposer,
+        EffortPicker
     ]
 );
 
@@ -58,6 +59,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-s", SaveFile, None),
         KeyBinding::new("ctrl-shift-x", StopTurn, None),
         KeyBinding::new("ctrl-l", FocusComposer, None),
+        KeyBinding::new("ctrl-shift-e", EffortPicker, None),
     ]);
 }
 
@@ -99,6 +101,10 @@ enum Cmd {
     Project(String),
     Thread(String),
     ShowArchived,
+    Settle,
+    Snooze(i64),
+    Worktree(String),
+    Effort(String),
 }
 
 struct ActiveTurn {
@@ -267,6 +273,18 @@ impl GrayApp {
         app
     }
 
+    fn work_root(&self) -> Option<PathBuf> {
+        if let Some(w) = self
+            .active_thread
+            .as_ref()
+            .and_then(|t| self.store.state.thread(t))
+            .and_then(|t| t.worktree.clone())
+        {
+            return Some(PathBuf::from(w));
+        }
+        self.project_path()
+    }
+
     fn project_path(&self) -> Option<PathBuf> {
         self.active_project
             .as_ref()
@@ -297,7 +315,7 @@ impl GrayApp {
     }
 
     fn refresh_workspace(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.project_path() else {
+        let Some(root) = self.work_root() else {
             self.tree.clear();
             self.branch = None;
             self.branches.clear();
@@ -368,7 +386,7 @@ impl GrayApp {
             self.slash(cmd.trim(), window, cx);
             return;
         }
-        let Some(root) = self.project_path() else {
+        let Some(root) = self.work_root() else {
             self.toast("Add a project first", true);
             cx.notify();
             return;
@@ -415,12 +433,14 @@ impl GrayApp {
             text: text.clone(),
             at: now(),
         });
+        let prompt = expand_mentions(&text, &root);
         let turn = provider::start(TurnRequest {
             provider: thread.provider.clone(),
             model: thread.model.clone(),
             mode: thread.mode.clone(),
-            prompt: text,
+            prompt,
             cwd: root,
+            effort: thread.effort.clone(),
             session: thread
                 .session
                 .as_ref()
@@ -458,6 +478,10 @@ impl GrayApp {
             "checkpoint" => Cmd::Checkpoint,
             "restore" => Cmd::Restore,
             "stop" => Cmd::Stop,
+            "settle" => Cmd::Settle,
+            "snooze" => Cmd::Snooze(arg.parse().unwrap_or(60)),
+            "worktree" => Cmd::Worktree(arg),
+            "effort" => Cmd::Effort(arg),
             _ => {
                 self.toast(format!("Unknown command /{name}"), true);
                 cx.notify();
@@ -609,7 +633,7 @@ impl GrayApp {
             cx.notify();
             return;
         }
-        let Some(root) = self.project_path() else {
+        let Some(root) = self.work_root() else {
             return;
         };
         self.terminal_lines.push(format!("$ {cmd}"));
@@ -646,7 +670,7 @@ impl GrayApp {
         let q = self.palette_query.trim().to_lowercase();
         let mut items: Vec<(String, String, Cmd)> = Vec::new();
         if self.palette_mode == PaletteMode::Files {
-            if let Some(root) = self.project_path() {
+            if let Some(root) = self.work_root() {
                 for f in workspace::all_files(&root, 5000) {
                     if q.is_empty() || fuzzy(&f.to_lowercase(), &q) {
                         items.push((f.clone(), "Open file".into(), Cmd::OpenFile(f)));
@@ -667,6 +691,16 @@ impl GrayApp {
         items.push((k("Open settings"), k("Ctrl+,"), Cmd::Settings));
         items.push((k("Toggle theme"), k("Ctrl+Shift+L"), Cmd::ToggleTheme));
         items.push((k("Create checkpoint"), k("Git"), Cmd::Checkpoint));
+        items.push((k("Settle or unsettle thread"), k("Thread"), Cmd::Settle));
+        items.push((k("Snooze thread for 1 hour"), k("Thread"), Cmd::Snooze(60)));
+        items.push((k("Unsnooze thread"), k("Thread"), Cmd::Snooze(0)));
+        for e in ["low", "medium", "high"] {
+            items.push((
+                format!("Effort: {e}"),
+                k("Ctrl+Shift+E"),
+                Cmd::Effort(e.into()),
+            ));
+        }
         items.push((k("Restore last checkpoint"), k("Git"), Cmd::Restore));
         items.push((
             k(if self.show_archived {
@@ -755,6 +789,11 @@ impl GrayApp {
                 format!("Create branch: {raw}"),
                 k("Git"),
                 Cmd::NewBranch(raw.into()),
+            ));
+            out.push((
+                format!("Create worktree: {raw}"),
+                k("Git"),
+                Cmd::Worktree(raw.into()),
             ));
         }
         if !raw.is_empty() && Path::new(raw).is_dir() {
@@ -876,7 +915,7 @@ impl GrayApp {
                 self.toast("Branch name required", true)
             }
             Cmd::Branch(b) => {
-                if let Some(root) = self.project_path() {
+                if let Some(root) = self.work_root() {
                     match git::checkout(&root, &b, false) {
                         Ok(()) => self.toast(format!("Switched to {b}"), false),
                         Err(e) => self.toast(e, true),
@@ -885,7 +924,7 @@ impl GrayApp {
                 }
             }
             Cmd::NewBranch(b) => {
-                if let Some(root) = self.project_path() {
+                if let Some(root) = self.work_root() {
                     match git::checkout(&root, &b, true) {
                         Ok(()) => self.toast(format!("Created {b}"), false),
                         Err(e) => self.toast(e, true),
@@ -939,7 +978,7 @@ impl GrayApp {
             }
             Cmd::OpenFile(path) => self.open_file(&path, window, cx),
             Cmd::Checkpoint => {
-                if let (Some(root), Some(tid)) = (self.project_path(), self.active_thread.clone())
+                if let (Some(root), Some(tid)) = (self.work_root(), self.active_thread.clone())
                     && let Some(tree) = git::checkpoint(&root)
                 {
                     self.store.append(Event::ActivityAdded {
@@ -966,7 +1005,7 @@ impl GrayApp {
                             _ => None,
                         })
                     });
-                match (self.project_path(), tree) {
+                match (self.work_root(), tree) {
                     (Some(root), Some(tree)) => {
                         match git::restore(&root, &tree) {
                             Ok(()) => self.toast("Restored checkpoint", false),
@@ -1003,8 +1042,80 @@ impl GrayApp {
                 self.active_tab = None;
                 self.refresh_workspace(cx);
             }
-            Cmd::Thread(id) => self.active_thread = Some(id),
+            Cmd::Thread(id) => {
+                self.active_thread = Some(id);
+                self.tabs.clear();
+                self.active_tab = None;
+                self.refresh_workspace(cx);
+            }
             Cmd::ShowArchived => self.show_archived = !self.show_archived,
+            Cmd::Settle => {
+                if let Some(t) = self
+                    .active_thread
+                    .as_ref()
+                    .and_then(|t| self.store.state.thread(t))
+                    .cloned()
+                {
+                    self.store.append(Event::ThreadSettled {
+                        id: t.id,
+                        settled: !t.settled,
+                    });
+                }
+            }
+            Cmd::Snooze(minutes) => {
+                if let Some(id) = self.active_thread.clone() {
+                    let until = if minutes <= 0 {
+                        0
+                    } else {
+                        now() + minutes * 60_000
+                    };
+                    self.store.append(Event::ThreadSnoozed { id, until });
+                }
+            }
+            Cmd::Effort(e) => {
+                if ["low", "medium", "high"].contains(&e.as_str()) {
+                    if let Some(id) = self.active_thread.clone() {
+                        self.store.append(Event::ThreadEffort { id, effort: e });
+                    }
+                } else {
+                    self.toast("Effort must be low, medium or high", true);
+                }
+            }
+            Cmd::Worktree(name) => {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    self.toast("Worktree name required", true);
+                } else if let Some(root) = self.project_path() {
+                    let tid = match self.active_thread.clone() {
+                        Some(t) => Some(t),
+                        None => self.create_thread(cx),
+                    };
+                    let base = root
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let dir = root
+                        .parent()
+                        .unwrap_or(&root)
+                        .join(format!("{base}-worktrees"))
+                        .join(&name);
+                    match git::worktree_add(&root, &dir, &name) {
+                        Ok(()) => {
+                            if let Some(id) = tid {
+                                self.store.append(Event::ThreadWorktree {
+                                    id,
+                                    path: dir.display().to_string(),
+                                });
+                            }
+                            self.toast(format!("Worktree {name} ready"), false);
+                            self.tabs.clear();
+                            self.active_tab = None;
+                            self.refresh_workspace(cx);
+                        }
+                        Err(e) => self.toast(e, true),
+                    }
+                }
+            }
         }
         if opening_terminal {
             self.terminal_input.update(cx, |s, cx| s.focus(window, cx));
@@ -1021,7 +1132,7 @@ impl GrayApp {
             self.tabs[i].editor.update(cx, |s, cx| s.focus(window, cx));
             return;
         }
-        let Some(root) = self.project_path() else {
+        let Some(root) = self.work_root() else {
             return;
         };
         let content = std::fs::read_to_string(root.join(rel)).unwrap_or_default();
@@ -1045,7 +1156,7 @@ impl GrayApp {
     }
 
     fn reload_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.project_path() else {
+        let Some(root) = self.work_root() else {
             return;
         };
         for tab in &mut self.tabs {
@@ -1057,7 +1168,7 @@ impl GrayApp {
     }
 
     fn save_file(&mut self, cx: &mut Context<Self>) {
-        let (Some(root), Some(i)) = (self.project_path(), self.active_tab) else {
+        let (Some(root), Some(i)) = (self.work_root(), self.active_tab) else {
             return;
         };
         let Some(tab) = self.tabs.get_mut(i) else {
@@ -1115,7 +1226,7 @@ impl GrayApp {
             .filter(|t| Some(&t.project_id) == self.active_project.as_ref())
             .map(|t| {
                 serde_json::json!({
-                    "id": t.id, "title": t.title, "pinned": t.pinned, "archived": t.archived,
+                    "id": t.id, "title": t.title, "pinned": t.pinned, "archived": t.archived, "settled": t.settled, "snoozed": t.snoozed_until > now(),
                     "status": if self.turns.contains_key(&t.id) { "running".to_string() } else { t.last_status.clone() },
                 })
             })
@@ -1133,7 +1244,7 @@ impl GrayApp {
             "theme": cx.theme().mode.name(),
             "project": self.active_project.as_ref().and_then(|p| self.store.state.project(p)).map(|p| serde_json::json!({"name": p.name, "path": p.path})),
             "projects": self.store.state.projects.len(),
-            "thread": thread.map(|t| serde_json::json!({"id": t.id, "title": t.title, "provider": t.provider, "model": t.model, "mode": t.mode, "pinned": t.pinned, "session": t.session.as_ref().map(|s| s.1.clone())})),
+            "thread": thread.map(|t| serde_json::json!({"id": t.id, "title": t.title, "provider": t.provider, "model": t.model, "mode": t.mode, "pinned": t.pinned, "settled": t.settled, "snoozed": t.snoozed_until > now(), "worktree": t.worktree, "effort": t.effort, "session": t.session.as_ref().map(|s| s.1.clone())})),
             "threads": threads,
             "messages": messages,
             "activities": activities,
@@ -1237,7 +1348,13 @@ impl GrayApp {
             if !active_project {
                 continue;
             }
-            let threads = self.store.state.threads_for(&p.id, self.show_archived);
+            let threads: Vec<_> = self
+                .store
+                .state
+                .threads_for(&p.id, self.show_archived)
+                .into_iter()
+                .filter(|t| self.show_archived || t.snoozed_until <= now())
+                .collect();
             if threads.is_empty() {
                 list = list.child(
                     div()
@@ -1440,6 +1557,23 @@ impl GrayApp {
                 )
             })
             .child(div().font_semibold().truncate().child(title))
+            .when_some(thread.and_then(|t| t.worktree.clone()), |s, w| {
+                let name = Path::new(&w)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                s.child(
+                    div()
+                        .text_xs()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(t.border)
+                        .text_color(t.muted_foreground)
+                        .child(format!("worktree {name}")),
+                )
+            })
             .when_some(project, |s, p| {
                 s.child(
                     div()
@@ -1621,6 +1755,9 @@ impl GrayApp {
         let provider = thread.map(|t| t.provider.clone()).unwrap_or(dp);
         let model = thread.map(|t| t.model.clone()).unwrap_or(dm);
         let mode = thread.map(|t| t.mode.clone()).unwrap_or(dmode);
+        let effort = thread
+            .map(|t| t.effort.clone())
+            .unwrap_or_else(|| "medium".into());
         let running = thread
             .map(|t| self.turns.contains_key(&t.id))
             .unwrap_or(false);
@@ -1652,7 +1789,12 @@ impl GrayApp {
                                 chip(
                                     "composer-model",
                                     IconName::Bot,
-                                    format!("{} · {}", provider::provider_label(&provider), model),
+                                    format!(
+                                        "{} · {} · {}",
+                                        provider::provider_label(&provider),
+                                        model,
+                                        effort
+                                    ),
                                     cx,
                                 )
                                 .on_click(cx.listener(
@@ -2335,6 +2477,9 @@ impl Render for GrayApp {
             .on_action(cx.listener(|this, _: &ModelPicker, w, cx| {
                 this.open_palette(PaletteMode::Commands, "Model:", w, cx)
             }))
+            .on_action(cx.listener(|this, _: &EffortPicker, w, cx| {
+                this.open_palette(PaletteMode::Commands, "Effort:", w, cx)
+            }))
             .on_action(cx.listener(|this, _: &ModePicker, w, cx| {
                 this.open_palette(PaletteMode::Commands, "Mode:", w, cx)
             }))
@@ -2369,4 +2514,25 @@ impl Render for GrayApp {
                 )
             })
     }
+}
+
+fn expand_mentions(text: &str, root: &Path) -> String {
+    let mut out = text.to_string();
+    let mut seen = HashSet::new();
+    for word in text.split_whitespace() {
+        let Some(rel) = word.strip_prefix('@') else {
+            continue;
+        };
+        let rel = rel.trim_end_matches([',', '.', ';', ':', ')']);
+        if rel.is_empty() || rel.contains("..") || !seen.insert(rel.to_string()) {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(root.join(rel)) {
+            let lang = workspace::language_for(rel);
+            out.push_str(&format!(
+                "\n\n<file path=\"{rel}\">\n```{lang}\n{content}\n```\n</file>"
+            ));
+        }
+    }
+    out
 }

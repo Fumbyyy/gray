@@ -69,6 +69,22 @@ pub enum Event {
         detail: String,
         at: i64,
     },
+    ThreadSettled {
+        id: String,
+        settled: bool,
+    },
+    ThreadSnoozed {
+        id: String,
+        until: i64,
+    },
+    ThreadWorktree {
+        id: String,
+        path: String,
+    },
+    ThreadEffort {
+        id: String,
+        effort: String,
+    },
     ThreadSession {
         id: String,
         provider: String,
@@ -118,6 +134,10 @@ pub struct Thread {
     pub archived: bool,
     pub items: Vec<Item>,
     pub session: Option<(String, String)>,
+    pub settled: bool,
+    pub snoozed_until: i64,
+    pub worktree: Option<String>,
+    pub effort: String,
     pub updated_at: i64,
     pub last_status: String,
 }
@@ -164,6 +184,10 @@ impl State {
                 archived: false,
                 items: Vec::new(),
                 session: None,
+                settled: false,
+                snoozed_until: 0,
+                worktree: None,
+                effort: "medium".into(),
                 updated_at: *at,
                 last_status: String::new(),
             }),
@@ -231,6 +255,26 @@ impl State {
                     t.updated_at = *at;
                 }
             }
+            Event::ThreadSettled { id, settled } => {
+                if let Some(t) = self.thread_mut(id) {
+                    t.settled = *settled;
+                }
+            }
+            Event::ThreadSnoozed { id, until } => {
+                if let Some(t) = self.thread_mut(id) {
+                    t.snoozed_until = *until;
+                }
+            }
+            Event::ThreadWorktree { id, path } => {
+                if let Some(t) = self.thread_mut(id) {
+                    t.worktree = Some(path.clone());
+                }
+            }
+            Event::ThreadEffort { id, effort } => {
+                if let Some(t) = self.thread_mut(id) {
+                    t.effort = effort.clone();
+                }
+            }
             Event::ThreadSession {
                 id,
                 provider,
@@ -282,8 +326,9 @@ impl State {
             .filter(|t| t.project_id == project_id && t.archived == archived)
             .collect();
         list.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
+            a.settled
+                .cmp(&b.settled)
+                .then(b.pinned.cmp(&a.pinned))
                 .then(b.updated_at.cmp(&a.updated_at))
         });
         list
