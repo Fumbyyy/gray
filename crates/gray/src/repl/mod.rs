@@ -775,7 +775,6 @@ pub async fn run_repl_mode(
         t.set_hide_thinking(config.reasoning_hidden());
         t.set_cwd(cwd.display().to_string());
 
-        t.set_home_session(session::current_session_line(&session_state));
         if let Some((sid, shared_history)) = resumed_session_info.take() {
             let n_entries = shared_history.len();
             let _ = t.draw();
@@ -798,6 +797,7 @@ pub async fn run_repl_mode(
             };
             let (tool_labels, tool_previews) = session::tool_display_maps(&tool_defs);
             let replay_started = std::time::Instant::now();
+            session::note_resume_trailer(sid.as_str());
             t.replay_session_history_with_tools(
                 shared_history,
                 &cwd,
