@@ -231,6 +231,14 @@ impl Agent {
                 name, &names,
             )));
         }
+        if let serde_json::Value::String(s) = args
+            && s.trim_start().starts_with('[')
+            && let Err(e) = serde_json::from_str::<serde_json::Value>(s)
+        {
+            return Err(ToolOutput::error(format!(
+                "The tool-call block is not valid JSON ({e}), so none of its calls ran. Check the brackets and quotes, then resend the whole block."
+            )));
+        }
         if !args.is_object() {
             let got = match args {
                 serde_json::Value::Null => {
