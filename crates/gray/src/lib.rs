@@ -15,7 +15,6 @@ pub(crate) mod cron_tool;
 pub(crate) mod exe_watch;
 pub(crate) mod failed_turn;
 pub mod feedback;
-pub(crate) mod fusion;
 pub(crate) mod gateway_pid;
 pub mod host;
 pub mod keymap;
@@ -336,10 +335,6 @@ async fn build_agent_with(
                     prompt.push_str(&system_prompt::session_card(&session_cwd));
                 }
 
-                if let Some(framing) = crate::fusion::lead_framing() {
-                    prompt.push_str("\n\n");
-                    prompt.push_str(framing);
-                }
                 prompt
             })
         }),
@@ -399,9 +394,6 @@ pub(crate) fn extra_surface_plugins(
     if !(config.bare || config.lean || !spawn_plugins) {
         extra.push(Arc::new(crate::skills_tool::SkillsPlugin::default()));
         extra.push(Arc::new(crate::skills_tool::ProjectContextPlugin));
-    }
-    if !config.bare && spawn_plugins {
-        extra.push(Arc::new(crate::fusion::FusionPlugin::default()));
     }
     extra
 }

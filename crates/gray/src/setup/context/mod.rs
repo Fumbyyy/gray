@@ -3,7 +3,7 @@ mod providers;
 pub(crate) use providers::{
     EndpointProbe, LocalEndpointSuggestion, cache_model_efforts, cache_model_price_cliff,
     ensure_disk_loaded, fetch_plugin_provider_models, load_provider_model_list, ollama_running,
-    probe_custom_endpoint, probe_local_endpoints, provider_model_lists, save_provider_model_list,
+    probe_custom_endpoint, probe_local_endpoints, save_provider_model_list,
     warm_rates_from_disk_cache,
 };
 pub use providers::{

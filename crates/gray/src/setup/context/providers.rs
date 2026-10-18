@@ -502,15 +502,10 @@ pub fn fetch_live_provider_models(base_url: &str, api_key: Option<&str>) -> Vec<
         .unwrap_or_default()
     });
 
-    let Ok(home) = crate::setup::catalog::gray_home() else {
-        return live;
-    };
-    let list_key = crate::setup::catalog::normalize_custom_base_url(base_url);
-    let mut rows: Vec<crate::setup::variants::CachedRow> = live
+    let rows: Vec<crate::setup::variants::CachedRow> = live
         .into_iter()
         .map(|(id, name)| crate::setup::variants::CachedRow::Pair(id, name))
         .collect();
-    crate::fusion::extend_with_fusion(&home, &list_key, &mut rows);
     for row in &rows {
         row.register();
     }
@@ -607,10 +602,6 @@ async fn plugin_models_rpc(
         save_provider_model_rows(&list_key, rows.clone());
     }
 
-    let mut rows = rows;
-    if let Ok(home) = crate::setup::catalog::gray_home() {
-        crate::fusion::extend_with_fusion(&home, &list_key, &mut rows);
-    }
     if let Some(last) = rows.last() {
         last.register();
     }
@@ -977,12 +968,6 @@ fn read_model_list_map(
         .collect()
 }
 
-pub(crate) fn provider_model_lists(
-    home: &std::path::Path,
-) -> std::collections::BTreeMap<String, Vec<crate::setup::variants::CachedRow>> {
-    read_model_list_map(&home.join("provider_models.json"))
-}
-
 pub(crate) fn load_provider_model_rows_at(
     home: &std::path::Path,
     base_url: &str,
@@ -1023,9 +1008,7 @@ pub(crate) fn load_provider_model_list(base_url: &str) -> Vec<(String, String)> 
     let Ok(home) = crate::setup::catalog::gray_home() else {
         return Vec::new();
     };
-    let mut rows = load_provider_model_rows_at(&home, base_url);
-    let base = crate::setup::catalog::normalize_custom_base_url(base_url);
-    crate::fusion::extend_with_fusion(&home, &base, &mut rows);
+    let rows = load_provider_model_rows_at(&home, base_url);
     for row in &rows {
         row.register();
     }

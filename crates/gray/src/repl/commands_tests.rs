@@ -360,7 +360,7 @@ fn model_completes_cached_ids() {
     runtime.block_on(async {
         let models = crate::setup::fetch_live_provider_models(&base, None);
 
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 1);
     });
     response.join().unwrap();
     let rows = complete_command_args("models", "", cwd);

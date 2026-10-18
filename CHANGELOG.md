@@ -14,6 +14,10 @@
 - **Inline kitty image previews moved under `qol`.** Rendering unchanged;
   the protocol probe, transmit, and placeholder cells live in
   `qol::kitty` alongside the other quality-of-life subsystems.
+- **Fusion moved out of core into the `gray-fusion` plugin** (`gray
+  plugin install fusion`). The lead + persistent-sidekick `handoff`
+  pair, the folded Fusion model row, and provider pairings ship as a
+  plugin now, and it's opt-in rather than in the default install set.
 
 ## [0.2.2] - 2026-10-17
 
