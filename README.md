@@ -47,7 +47,7 @@ curl -fsSL https://gray.alignment.id/install.sh | sh -s -- beta   # rebuilt on e
 cargo build --release -p gray                                     # from source
 ```
 
-**Native Windows 11 x64** (no WSL; Git for Windows supplies the shell). In PowerShell:
+**Native Windows 10/11 x64** (no WSL; Git for Windows supplies the shell). In PowerShell:
 
 ```powershell
 irm https://gray.alignment.id/install.ps1 | iex
@@ -145,7 +145,7 @@ Gray runs the model's shell commands with **your privileges, no approval prompt,
 |---|---|---|
 | Linux x86_64 / aarch64 | musl-static | full support, gateway as a user service |
 | macOS arm64 / x86_64 | Rust-static, not notarized | curl installs run fine; browser downloads may hit Gatekeeper |
-| Windows x86_64 | native, Windows 11+ | Git Bash shell; no gateway/cron execution yet |
+| Windows x86_64 | native, Windows 10+ | Git Bash shell; no gateway/cron execution yet |
 
 **Layout** — `gray` (CLI, TUI, sessions, cron, gateway) · `gray-core` (agent loop) · `gray-provider` (OpenAI-compatible + native Anthropic streaming) · `gray-tools` · `gray-plugin` · `gray-pkg` · `gray-markdown`.
 

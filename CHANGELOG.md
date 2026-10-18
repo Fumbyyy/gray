@@ -14,6 +14,13 @@
 - **Inline kitty image previews moved under `qol`.** Rendering unchanged;
   the protocol probe, transmit, and placeholder cells live in
   `qol::kitty` alongside the other quality-of-life subsystems.
+- **Windows 10 is now a supported native target.** `install-native.ps1`
+  admits build 10240+ instead of requiring Windows 11 (22000+), which
+  also covers Windows Server 2016/2019/2022. No binary change was
+  needed: the MSVC target's floor was already Windows 10 and every
+  Windows API gray uses predates it. A windows-2022 CI leg runs the
+  installer suite as sub-22000 evidence; GitHub hosts no Windows 10
+  client runner.
 
 ## [0.2.2] - 2026-10-17
 
