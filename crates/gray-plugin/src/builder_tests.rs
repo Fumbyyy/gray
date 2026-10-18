@@ -132,3 +132,109 @@ async fn default_surface_keeps_background_jobs_between_calls() {
         "{notices:?}"
     );
 }
+
+fn env_plugin(name: &str, var: &str, value: &str, granted: bool) -> Arc<dyn Plugin> {
+    struct EnvPlugin {
+        name: String,
+        var: String,
+        value: String,
+        granted: bool,
+    }
+    impl Plugin for EnvPlugin {
+        fn manifest(&self) -> Manifest {
+            Manifest {
+                name: self.name.clone(),
+                shell_env: Some(crate::ShellEnvDecl {
+                    vars: [(self.var.clone(), self.value.clone())]
+                        .into_iter()
+                        .collect(),
+                    path_prepend: Vec::new(),
+                }),
+                ..Manifest::default()
+            }
+        }
+        fn capabilities(&self) -> Vec<String> {
+            if self.granted {
+                vec![crate::capabilities::SHELL_ENV.to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+    Arc::new(EnvPlugin {
+        name: name.to_string(),
+        var: var.to_string(),
+        value: value.to_string(),
+        granted,
+    })
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn granted_shell_env_reaches_the_bash_tool() {
+    let _guard = build_lock();
+    let (reg, _) = from_plugins(&[env_plugin("envy", "GRAY_PLUGIN_ENV", "hello-env", true)]);
+    let out = ToolExecutor::execute(
+        &reg,
+        &ToolContext::default(),
+        "bash",
+        json!({"command": "echo var=$GRAY_PLUGIN_ENV"}),
+    )
+    .await;
+    assert!(!out.is_error, "{out:?}");
+    assert!(
+        out.content.contains("var=hello-env"),
+        "plugin env must reach bash: {}",
+        out.content
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn ungranted_shell_env_contributes_nothing() {
+    let _guard = build_lock();
+    let (reg, _) = from_plugins(&[env_plugin("envy", "GRAY_PLUGIN_ENV", "hello-env", false)]);
+    let out = ToolExecutor::execute(
+        &reg,
+        &ToolContext::default(),
+        "bash",
+        json!({"command": "echo var=${GRAY_PLUGIN_ENV:-empty}"}),
+    )
+    .await;
+    assert!(!out.is_error, "{out:?}");
+    assert!(
+        out.content.contains("var=empty"),
+        "ungranted plugin env must not reach bash: {}",
+        out.content
+    );
+    let warnings = take_builder_warnings();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("envy") && w.contains("shell.env")),
+        "expected grant warning, got: {warnings:?}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn later_plugin_shell_env_vars_override_earlier_ones() {
+    let _guard = build_lock();
+    let (reg, _) = from_plugins(&[
+        env_plugin("first", "GRAY_PLUGIN_ORDER", "one", true),
+        env_plugin("second", "GRAY_PLUGIN_ORDER", "two", true),
+    ]);
+    let out = ToolExecutor::execute(
+        &reg,
+        &ToolContext::default(),
+        "bash",
+        json!({"command": "echo order=$GRAY_PLUGIN_ORDER"}),
+    )
+    .await;
+    assert!(!out.is_error, "{out:?}");
+    assert!(
+        out.content.contains("order=two"),
+        "later plugin must win: {}",
+        out.content
+    );
+}

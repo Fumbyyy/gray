@@ -28,8 +28,8 @@ pub use sidecar::{
 };
 
 pub use capabilities::{
-    CapabilitySpec, HOST_ASK as CAP_HOST_ASK, HOST_SAY as CAP_HOST_SAY, HOST_TURN, TOOL_OVERRIDE,
-    WIDGET_OVERRIDE,
+    CapabilitySpec, HOST_ASK as CAP_HOST_ASK, HOST_SAY as CAP_HOST_SAY, HOST_TURN, SHELL_ENV,
+    TOOL_OVERRIDE, WIDGET_OVERRIDE,
 };
 
 pub const DYNAMIC_PROTOCOL: &str = "1.3";
@@ -70,6 +70,9 @@ pub struct Manifest {
     #[serde(default)]
     pub capabilities: Vec<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env: Option<ShellEnvDecl>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires_plugins: Vec<String>,
 
@@ -80,6 +83,17 @@ pub struct Manifest {
     pub composite_rows: Vec<CompositeRowDecl>,
     #[serde(skip)]
     pub provider_errors: Vec<ProviderValidationError>,
+}
+
+/// A plugin's `shell_env` manifest field: static environment contributions
+/// for the bash tool's shell, gated by the `shell.env` capability.
+/// `path_prepend` accepts absolute directories only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShellEnvDecl {
+    #[serde(default)]
+    pub vars: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub path_prepend: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -213,6 +227,11 @@ impl Manifest {
             protocol: v.get("protocol").and_then(|s| s.as_str()).map(|s| s.into()),
             subcommands: str_list("subcommands"),
             capabilities: crate::capabilities::parse_declared(&str_list("capabilities")),
+            shell_env: v.get("shell_env").and_then(|raw| {
+                serde_json::from_value(raw.clone())
+                    .map_err(|e| log::warn!("ignoring invalid shell_env in plugin manifest: {e}"))
+                    .ok()
+            }),
             requires_plugins: str_list("requires_plugins"),
             providers,
             composite_rows: serde_json::from_value(

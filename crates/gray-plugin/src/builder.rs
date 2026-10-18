@@ -28,7 +28,9 @@ pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
 
     let ledger = Arc::new(gray_tools::FileLedger::new());
     let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(
-        gray_tools::BashTool::default().with_ledger(ledger.clone()),
+        gray_tools::BashTool::default()
+            .with_ledger(ledger.clone())
+            .with_plugin_env(merged_shell_env(plugins)),
     )];
     for p in plugins {
         let owner_name = p.manifest().name;
@@ -66,6 +68,39 @@ pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
     let registry = Registry::new(tools);
     track_current_ledger(&ledger);
     (registry, manifests)
+}
+
+/// Fold each enabled plugin's `shell_env` manifest field into one
+/// contribution, in registry order. A plugin without the `shell.env` grant
+/// contributes nothing; per-entry validation (reserved names, non-absolute
+/// paths) happens inside [`gray_tools::PluginEnv::add_plugin`].
+fn merged_shell_env(plugins: &[Arc<dyn Plugin>]) -> gray_tools::PluginEnv {
+    let mut env = gray_tools::PluginEnv::default();
+    for p in plugins {
+        let manifest = p.manifest();
+        let Some(decl) = &manifest.shell_env else {
+            continue;
+        };
+        if !p
+            .capabilities()
+            .iter()
+            .any(|c| c == crate::capabilities::SHELL_ENV)
+        {
+            push_builder_warning(format!(
+                "plugin {:?} declares shell_env without the `{}` grant — ignoring it (gray plugin capabilities {} --all)",
+                manifest.name,
+                crate::capabilities::SHELL_ENV,
+                manifest.name
+            ));
+            continue;
+        }
+        env.add_plugin(
+            &manifest.name,
+            decl.vars.iter().map(|(k, v)| (k.clone(), v.clone())),
+            decl.path_prepend.iter().map(PathBuf::from),
+        );
+    }
+    env
 }
 
 static CURRENT_LEDGER: std::sync::Mutex<Option<std::sync::Weak<gray_tools::FileLedger>>> =

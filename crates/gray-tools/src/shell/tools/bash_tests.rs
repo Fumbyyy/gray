@@ -1072,6 +1072,7 @@ async fn run_lane(
         ctx.session_id.as_deref(),
         Some(&report),
         None,
+        None,
     )
     .expect("spawn");
     let pgid = spawned.pgid;

@@ -20,7 +20,7 @@ use crate::shell::exit::exit_report;
 use crate::shell::fence::fence;
 use crate::shell::kill::term_then_kill;
 use crate::shell::pump::{Pump, now_grindmill};
-use crate::shell::spawn::spawn;
+use crate::shell::spawn::{PluginEnv, spawn};
 use crate::shell::view::{
     format_elapsed, header, middle_out, resume_hint, squeeze as squeeze_view,
 };
@@ -73,11 +73,20 @@ pub struct BashTool {
     cwd: Mutex<BTreeMap<String, (PathBuf, PathBuf)>>,
 
     ledger: Option<Arc<crate::ledger::FileLedger>>,
+
+    plugin_env: PluginEnv,
 }
 
 impl BashTool {
     pub fn with_ledger(mut self, ledger: Arc<crate::ledger::FileLedger>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// Environment contributed by enabled plugins (`shell_env` manifests);
+    /// merged once when the registry is built.
+    pub fn with_plugin_env(mut self, env: PluginEnv) -> Self {
+        self.plugin_env = env;
         self
     }
 
@@ -192,6 +201,7 @@ impl Tool for BashTool {
             ctx.session_id.as_deref(),
             Some(&cwd_report),
             ps_report.as_deref(),
+            Some(&self.plugin_env),
         ) {
             Ok(s) => s,
             Err(e) => return fail(format!("failed to spawn shell: {e}")),
