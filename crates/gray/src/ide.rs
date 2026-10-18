@@ -180,6 +180,7 @@ pub struct IdeSession {
 
 impl IdeSession {
     pub fn new(config: Config, cwd: PathBuf) -> Self {
+        gray_plugin::builder::set_autostart(true);
         let unconfigured = config.model.is_none();
         let hide_thinking = config.reasoning_hidden();
         Self {
@@ -387,29 +388,29 @@ impl IdeSession {
             )
         }));
         let Some((cards, prompt, sends)) =
-            crate::repl::cron::idle_wake(self.agent.as_ref(), sid.as_deref(), &self.cwd)
+            crate::repl::notice::idle_wake(self.agent.as_ref(), sid.as_deref(), &self.cwd)
         else {
             return Ok(false);
         };
         for card in cards {
             match card {
-                crate::repl::cron::WakeCard::Job(j) => say(
+                crate::repl::notice::WakeCard::Job(j) => say(
                     None,
                     &format!(
                         "background job {} finished ({}) after {} \u{b7} log {}",
                         j.id, j.outcome, j.elapsed, j.log
                     ),
                 ),
-                crate::repl::cron::WakeCard::Cron(c) => say(
+                crate::repl::notice::WakeCard::Cron(c) => say(
                     None,
                     &format!(
                         "cron: {}",
-                        crate::cron_fire::format_delivery_plain(
+                        crate::repl::notice::format_delivery_plain(
                             &c.name, &c.body, c.reminder, c.failed
                         )
                     ),
                 ),
-                crate::repl::cron::WakeCard::Text(text) => say(None, &text),
+                crate::repl::notice::WakeCard::Text(text) => say(None, &text),
             }
         }
         if let Some(msg) = crate::turn_caps::check_caps(

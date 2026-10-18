@@ -451,18 +451,6 @@ fn skill_singular_is_alias_for_skills_space() {
 }
 
 #[test]
-fn cron_parses_bare_and_single_arg() {
-    assert!(matches!(
-        parse_command("/cron"),
-        ReplCommand::CronJobs(None)
-    ));
-    let ReplCommand::CronJobs(Some(id)) = parse_command("/cron abc123") else {
-        panic!("expected CronJobs(Some)");
-    };
-    assert_eq!(id, "abc123");
-}
-
-#[test]
 fn bare_model_and_provider_aliases_open_two_pane_picker() {
     assert!(matches!(parse_command("/models"), ReplCommand::ModelPanes));
     assert!(matches!(parse_command("/MODELS"), ReplCommand::ModelPanes));

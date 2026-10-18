@@ -42,10 +42,6 @@ pub(crate) fn is_turn_local_command(
         | super::ReplCommand::Intro(_)
         | super::ReplCommand::Gateway(_)
         | super::ReplCommand::Hehe => true,
-        super::ReplCommand::CronJobs(arg) => arg
-            .as_deref()
-            .and_then(super::handlers::parse_on_off)
-            .is_none(),
         super::ReplCommand::Unknown(_) => plugin_turn_local_args(text, hooks).is_some(),
         _ => false,
     }
@@ -103,26 +99,6 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                     super::jobs::dashboard(&jobs, &wakes, crate::cron::now_secs())
                 })
                 .unwrap_or_else(|e| format!("jobs dashboard failed: {e}"));
-            super::say(tui, &text);
-        }
-        super::ReplCommand::CronJobs(arg) => {
-            let text = crate::setup::gray_home()
-                .and_then(|home| {
-                    let store = crate::cron::CronStore::open(home.join("cron"))?;
-                    let jobs = store.list()?;
-                    let now = crate::cron::now_secs();
-                    let health = store.health(now).ok();
-                    Ok(match arg {
-                        None => super::cron::format_cron_dashboard(&jobs, health.as_ref(), now),
-                        Some(id) => match jobs.into_iter().find(|j| j.id == id || j.name == id) {
-                            Some(j) => {
-                                super::cron::format_cron_dashboard(&[j], health.as_ref(), now)
-                            }
-                            None => format!("unknown cron job {id:?}"),
-                        },
-                    })
-                })
-                .unwrap_or_else(|e: anyhow::Error| format!("cron dashboard failed: {e}"));
             super::say(tui, &text);
         }
         super::ReplCommand::Help => {

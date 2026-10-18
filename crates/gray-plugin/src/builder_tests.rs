@@ -238,3 +238,80 @@ async fn later_plugin_shell_env_vars_override_earlier_ones() {
         out.content
     );
 }
+
+fn lock_entry(argv: &[&str]) -> crate::lock::LockEntry {
+    serde_json::from_value(json!({
+        "ecosystem": "gray-native",
+        "version": "0",
+        "hash": "",
+        "source": "test",
+        "argv": argv,
+        "adapter_version": "1",
+        "installed_at": "now",
+        "scope": "user",
+        "enabled": true,
+    }))
+    .unwrap()
+}
+
+fn write_manifest(dir: &std::path::Path, name: &str, extra: serde_json::Value) {
+    let mut m = json!({"name": name, "tools": [], "commands": []});
+    m.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    std::fs::write(dir.join(format!("{name}-manifest.json")), m.to_string()).unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn an_autostart_lock_plugin_spawns_eagerly_only_when_the_host_allows() {
+    let _guard = build_lock();
+    let dir = tempfile::tempdir().unwrap();
+    write_manifest(dir.path(), "demo", json!({"autostart": true}));
+    let entry = lock_entry(&["/nonexistent/demo-binary"]);
+    let mut outcomes = Vec::new();
+    super::set_autostart(false);
+    let lazy = spawn_lock_plugin("demo", &entry, Some(dir.path()), &None, &mut outcomes).await;
+    assert!(
+        lazy.is_some() && outcomes.iter().all(|o| o.error.is_none()),
+        "without the host opt-in an autostart plugin stays lazy: {outcomes:?}"
+    );
+    super::set_autostart(true);
+    let got = spawn_lock_plugin("demo", &entry, Some(dir.path()), &None, &mut outcomes).await;
+    super::set_autostart(false);
+    assert!(
+        got.is_none(),
+        "autostart must attempt a real spawn at session start"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| o.name == "demo" && o.error.is_some()),
+        "the failed eager spawn should surface as an error outcome: {outcomes:?}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_plain_lock_plugin_stays_dormant() {
+    let _guard = build_lock();
+    let dir = tempfile::tempdir().unwrap();
+    write_manifest(dir.path(), "demo", json!({}));
+    let entry = lock_entry(&["/nonexistent/demo-binary"]);
+    let mut outcomes = Vec::new();
+    let got = spawn_lock_plugin("demo", &entry, Some(dir.path()), &None, &mut outcomes)
+        .await
+        .expect("a dormant plugin loads without spawning");
+    assert!(
+        outcomes.iter().all(|o| o.error.is_none()),
+        "lazy load must not surface a spawn error: {outcomes:?}"
+    );
+    assert_eq!(got.manifest().name, "demo");
+    // the eager path would have attempted to spawn /nonexistent/demo-binary
+    // and returned None (see the autostart test); reaching here with the
+    // same argv proves the plugin stayed a lazy placeholder
+    assert!(
+        got.run_command("/nope", vec![]).await.is_none(),
+        "an undeclared command must not wake a dormant plugin"
+    );
+}

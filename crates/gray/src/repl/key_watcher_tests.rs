@@ -106,8 +106,6 @@ fn builtin_commands_stay_turn_local() {
         "/usage",
         "/cost",
         "/jobs",
-        "/cron",
-        "/cron nightly",
         "/help",
         "/theme",
         "/theme banish",
@@ -178,10 +176,6 @@ fn mutating_or_agent_commands_still_queue() {
     for cmd in [
         "/model",
         "/compact",
-        "/cron on",
-        "/cron off",
-        "/cron enable",
-        "/cron disable",
         "normal follow-up",
     ] {
         assert!(!is_turn_local_command(cmd, &hooks()), "{cmd}");

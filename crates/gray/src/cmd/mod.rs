@@ -11,7 +11,7 @@ use crate::CmdVerb;
 use crate::config::Config;
 use crate::repl::commands::{CmdSurface, resolve};
 use crate::repl::usage_panel;
-use crate::repl::{SessionTotals, cron, handlers};
+use crate::repl::{SessionTotals, handlers};
 use crate::session_store::{JsonlSessionStore, SessionId};
 use crate::setup::variants::{Parts, RowShape};
 
@@ -123,7 +123,6 @@ async fn run_command(
             "models" => model_result(config, home, &rest),
             "new" => new_result(home).await,
             "sessions" => sessions_result(home, &rest).await,
-            "cron" => cron_result(home, &rest),
             "skills" => skills_result(&rest),
             "context" => context_result(config, home, &rest).await,
             "compact" => compact_result(config, home, &rest).await,
@@ -281,7 +280,7 @@ fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandR
     }
     let pending = store::PendingDoc {
         kind: "model_picker".to_string(),
-        created_at: crate::cron::now_secs(),
+        created_at: crate::util::now_secs(),
         user: None,
         draft: draft.clone(),
         models: models.clone(),
@@ -496,8 +495,8 @@ async fn new_result(home: &Path) -> Result<CommandResult, CmdError> {
     {
         state["session_id"] = Value::Null;
         state["generation"] = Value::String(uuid::Uuid::new_v4().simple().to_string());
-        state["last_activity"] = json!(crate::cron::now_secs());
-        let _ = crate::cron::store::atomic_write_json(&state_path, &state);
+        state["last_activity"] = json!(crate::util::now_secs());
+        let _ = crate::util::atomic_write_json(&state_path, &state);
     }
 
     let store = JsonlSessionStore::new(home.join("sessions"));
@@ -529,26 +528,6 @@ async fn sessions_result(home: &Path, rest: &str) -> Result<CommandResult, CmdEr
         out.push('\n');
     }
     Ok(CommandResult::text(out.trim_end()))
-}
-
-fn cron_result(home: &Path, rest: &str) -> Result<CommandResult, CmdError> {
-    let store = crate::cron::CronStore::open(home.join("cron"))
-        .map_err(|e| CmdError::unavailable(format!("{e:#}")))?;
-    let jobs = store
-        .list()
-        .map_err(|e| CmdError::unavailable(format!("{e:#}")))?;
-    let now = crate::cron::now_secs();
-    let health = store.health(now).ok();
-    let id = rest.trim();
-    let text = if id.is_empty() {
-        cron::format_cron_dashboard(&jobs, health.as_ref(), now)
-    } else {
-        match jobs.into_iter().find(|j| j.id == id || j.name == id) {
-            Some(j) => cron::format_cron_dashboard(&[j], health.as_ref(), now),
-            None => format!("unknown cron job {id:?}"),
-        }
-    };
-    Ok(CommandResult::text(text))
 }
 
 fn unknown_skill_text(name: &str) -> String {
@@ -1115,7 +1094,7 @@ fn interact(
     token: &str,
     action_json: Option<&str>,
 ) -> Result<CommandResult, CmdError> {
-    let mut rec = store::get(home, token, crate::cron::now_secs())?;
+    let mut rec = store::get(home, token, crate::util::now_secs())?;
     if rec.kind != "model_picker" {
         return Err(CmdError::invalid_action(format!(
             "unknown pending doc kind '{}'",

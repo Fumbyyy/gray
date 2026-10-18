@@ -87,7 +87,7 @@ pub(crate) async fn run_prompt_turn(
                 }
                 Err(e) => {
                     if let Some((shared, _)) = tui {
-                        super::cron::push_notice(
+                        super::notice::push_notice(
                             &mut shared.lock().expect("tui lock"),
                             "Provider error",
                             &e.to_string(),
@@ -569,7 +569,7 @@ pub(crate) async fn run_prompt_turn(
 
                     t.push_error(&msg);
                     if reloaded {
-                        super::cron::push_notice(&mut t, "API key reloaded", RELOADED, false);
+                        super::notice::push_notice(&mut t, "API key reloaded", RELOADED, false);
                     }
                 }
             } else if crate::ide::sink_active() {

@@ -4,7 +4,7 @@ const NOW: i64 = 1_700_000_000;
 
 fn origin(chat: &str) -> crate::cron::store::Origin {
     crate::cron::store::Origin {
-        platform: crate::cron_serve::SESSION_PLATFORM.to_string(),
+        platform: crate::session_mailbox::SESSION_PLATFORM.to_string(),
         chat: chat.to_string(),
         thread: None,
         route: None,

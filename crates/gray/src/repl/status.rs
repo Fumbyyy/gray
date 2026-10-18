@@ -419,7 +419,7 @@ pub(crate) async fn handle_context_window(
             if ok {
                 t.push_action("Context updated", Some(&msg));
             } else {
-                super::cron::push_notice(&mut t, "Context update failed", &msg, true);
+                super::notice::push_notice(&mut t, "Context update failed", &msg, true);
             }
             t.ensure_gap();
             let _ = t.draw();
@@ -757,7 +757,7 @@ pub(crate) async fn handle_compact(
     let messages = ag.messages().to_vec();
     if messages.is_empty() {
         if let Some(shared) = tui {
-            super::cron::push_notice(
+            super::notice::push_notice(
                 &mut shared.lock().expect("tui lock"),
                 "Nothing to compact",
                 "conversation is empty",
@@ -863,7 +863,7 @@ pub(crate) async fn handle_compact(
         }
         Ok(None) => {
             if let Some(shared) = tui {
-                super::cron::push_notice(
+                super::notice::push_notice(
                     &mut shared.lock().expect("tui lock"),
                     "Nothing to compact",
                     "conversation already fits in context",
@@ -878,7 +878,7 @@ pub(crate) async fn handle_compact(
         }
         Err(e) => {
             if let Some(shared) = tui {
-                super::cron::push_notice(
+                super::notice::push_notice(
                     &mut shared.lock().expect("tui lock"),
                     "Compaction failed",
                     &e.to_string(),

@@ -74,7 +74,7 @@ pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::compose
             }
             Err(e) => {
                 if let Some(shared) = tui {
-                    super::cron::push_notice(
+                    super::notice::push_notice(
                         &mut shared.lock().expect("tui lock"),
                         "Plugin error",
                         &e.to_string(),

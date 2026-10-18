@@ -167,10 +167,6 @@ pub(crate) fn queue_crash(notice: CrashNotice) {
     queue_say_inner(SayEntry::Crash(notice));
 }
 
-pub(crate) fn queue_say_lines(lines: Vec<Line<'static>>) {
-    queue_say_inner(SayEntry::Lines(lines));
-}
-
 static WAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn request_wake() {

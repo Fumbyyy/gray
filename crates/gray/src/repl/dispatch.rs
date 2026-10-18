@@ -320,42 +320,6 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
 
-        ReplCommand::CronJobs(arg) => {
-            let tui_shared = tui.as_ref().map(|(s, _)| s);
-            if let Some(on) = arg.as_deref().and_then(handlers::parse_on_off) {
-                let text = handlers::toggle_subsystem(handlers::Subsystem::Cron, on);
-                say(tui_shared, &text);
-                Flow::Continue
-            } else if arg.is_none() && tui_shared.is_some() {
-                let home = crate::setup::gray_home()?;
-                let bg = tui_shared.map(|s| s.lock().expect("tui lock").snapshot());
-                let changed = with_modal_sync(tui_shared, || {
-                    super::cron::run_cron_modal(bg.as_ref(), &home)
-                });
-                match changed {
-                    Ok(true) => say(tui_shared, "cron jobs updated"),
-                    Ok(false) => {}
-                    Err(e) => say(tui_shared, &format!("cron picker failed: {e}")),
-                }
-                Flow::Continue
-            } else {
-                let store = crate::cron::CronStore::open(crate::setup::gray_home()?.join("cron"))?;
-                let jobs = store.list()?;
-                let now = crate::cron::now_secs();
-
-                let health = store.health(now).ok();
-                let text = match arg {
-                    None => super::cron::format_cron_dashboard(&jobs, health.as_ref(), now),
-                    Some(id) => match jobs.into_iter().find(|j| j.id == id || j.name == id) {
-                        Some(j) => super::cron::format_cron_dashboard(&[j], health.as_ref(), now),
-                        None => format!("unknown cron job {id:?}"),
-                    },
-                };
-                say(tui_shared, &text);
-                Flow::Continue
-            }
-        }
-
         ReplCommand::Update(arg) => {
             super::maintenance::handle_update(tui, arg).await;
             Flow::Continue
@@ -495,7 +459,7 @@ pub(crate) async fn dispatch_command(
                 }
                 Err(e) => {
                     if let Some((shared, _)) = tui {
-                        super::cron::push_notice(
+                        super::notice::push_notice(
                             &mut shared.lock().expect("tui lock"),
                             "Provider error",
                             &e.to_string(),

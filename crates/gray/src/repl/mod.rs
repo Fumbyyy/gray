@@ -154,7 +154,6 @@ use crate::{DEFAULT_SYS_PROMPT, build_agent, load_or_create_system_prompt_at};
 pub mod agents_panel;
 pub mod attachments;
 pub mod commands;
-pub(crate) mod cron;
 mod customize;
 pub(crate) mod dispatch;
 pub mod format;
@@ -165,6 +164,7 @@ pub(crate) mod key_watcher;
 pub(crate) mod maintenance;
 pub(crate) mod pager;
 pub(crate) mod picker;
+pub(crate) mod notice;
 pub(crate) mod plugin_cmds;
 pub(crate) mod prompt_turn;
 mod session;
@@ -342,7 +342,7 @@ pub(crate) fn push_provider_connected(
     let detail = model_receipt_label(config);
     t.push_action(&format!("Connected to {prov_name}"), detail.as_deref());
     if let Some((old, new)) = clamped {
-        cron::push_notice(
+        notice::push_notice(
             &mut t,
             "Thinking effort clamped",
             &format!("from {old} to {new} (not supported by this model)"),
@@ -417,40 +417,6 @@ fn plugin_help_entries(hooks: &[Arc<dyn PluginHooks>]) -> Vec<(String, String)> 
         .collect()
 }
 
-struct ReplRunner {
-    config: Config,
-}
-
-#[async_trait::async_trait(?Send)]
-impl crate::cron_serve::AsyncRunner for ReplRunner {
-    async fn run(&self, prompt: String, cwd: std::path::PathBuf) -> anyhow::Result<String> {
-        Ok(self.run_full(prompt, cwd).await?.transcript)
-    }
-
-    async fn run_full(
-        &self,
-        prompt: String,
-        cwd: std::path::PathBuf,
-    ) -> anyhow::Result<crate::cron_serve::FireOutput> {
-        let mut config = self.config.clone();
-        crate::cron_serve::refresh_model_from_saved(&mut config);
-        let mut agent = crate::build_agent(&config, &cwd, None).await?;
-        let ctx = gray_core::agent::ToolContext {
-            cwd,
-            cancel: tokio_util::sync::CancellationToken::new(),
-            session_id: None,
-        };
-        let events = agent
-            .run(gray_core::message::Message::user(prompt), ctx)
-            .await
-            .map_err(|e| anyhow::anyhow!(crate::repl::format_core_error(&e, &config.base_url)))?;
-        Ok(crate::cron_serve::FireOutput {
-            transcript: crate::cron_fire::transcript_text(&events),
-            final_text: crate::cron_fire::final_assistant_text(&events),
-        })
-    }
-}
-
 async fn run_plugin_command(
     hooks: &[Arc<dyn PluginHooks>],
     name: &str,
@@ -484,57 +450,6 @@ async fn shutdown_hooks(agent: Option<&gray_core::agent::Agent>) {
         futures::future::join_all(hooks.iter().map(|h| h.shutdown())),
     )
     .await;
-}
-
-fn cron_tick_line(rep: &crate::cron_serve::TickReport) -> ratatui::text::Line<'static> {
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::{Line, Span};
-    let th = crate::theme::theme();
-    let dim = Style::default().fg(th.text_dim);
-    let mut spans = vec![
-        Span::styled(
-            "  cron",
-            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ·  ", dim),
-        Span::styled(
-            format!("{} fired", rep.fired),
-            Style::default().fg(th.text_body),
-        ),
-        Span::styled("  ·  ", dim),
-        Span::styled(
-            format!(
-                "{} error{}",
-                rep.errors,
-                if rep.errors == 1 { "" } else { "s" }
-            ),
-            Style::default()
-                .fg(th.error_soft)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let shown: Vec<&crate::cron_serve::DeliveredFire> = rep
-        .delivered
-        .iter()
-        .filter(|d| !d.to_chat)
-        .take(4)
-        .collect();
-    for (i, d) in shown.iter().enumerate() {
-        spans.push(Span::styled(if i == 0 { "   " } else { ", " }, dim));
-        spans.push(Span::styled(
-            d.name.clone(),
-            Style::default().fg(if d.failed {
-                th.error_soft
-            } else {
-                th.text_muted
-            }),
-        ));
-    }
-    let extra = rep.delivered.iter().filter(|d| !d.to_chat).count() - shown.len();
-    if extra > 0 {
-        spans.push(Span::styled(format!(", +{extra}"), dim));
-    }
-    Line::from(spans)
 }
 
 fn restore_viewport(tui: Option<&crate::composer::SharedTui>) {
@@ -597,6 +512,9 @@ pub async fn run_repl_mode(
 
     use std::io::IsTerminal;
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if interactive {
+        gray_plugin::builder::set_autostart(true);
+    }
 
     crate::composer::input::watch_dead_stdin();
 
@@ -970,55 +888,20 @@ pub async fn run_repl_mode(
         }
     }
 
-    if interactive && !cfg!(windows) {
-        let cfg = config.clone();
-        if let Ok(home) = crate::setup::gray_home()
-            && let Ok(store) = crate::cron::CronStore::open(home.join("cron"))
-        {
-            let inbox_home = home.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if let Some(sid) = crate::host::live_session()
-                        && crate::cron_serve::session_inbox_pending(&inbox_home, &sid)
-                    {
-                        crate::host::request_wake();
-                    }
+    if interactive
+        && !cfg!(windows)
+        && let Ok(home) = crate::setup::gray_home()
+    {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if let Some(sid) = crate::host::live_session()
+                    && crate::session_mailbox::session_inbox_pending(&home, &sid)
+                {
+                    crate::host::request_wake();
                 }
-            });
-            std::thread::spawn(move || {
-                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                else {
-                    return;
-                };
-                rt.block_on(async {
-                    let runner = ReplRunner { config: cfg };
-                    let deliver = crate::cron_serve::SaveLocalDeliver { home };
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-                    loop {
-                        interval.tick().await;
-                        match crate::cron_serve::tick_once(&store, &runner, &deliver, "repl").await
-                        {
-                            Ok(rep) if rep.fired > 0 || rep.errors > 0 => {
-                                for saved in rep.delivered.iter().filter(|d| d.to_chat) {
-                                    crate::host::queue_say(crate::cron_serve::format_fire_chat(
-                                        saved,
-                                    ));
-                                }
-
-                                if rep.errors > 0 {
-                                    crate::host::queue_say_lines(vec![cron_tick_line(&rep)]);
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(e) => log::warn!("repl cron tick failed: {e:#}"),
-                        }
-                    }
-                });
-            });
-        }
+            }
+        });
     }
 
     let mut hide_thinking = config.reasoning_hidden();
@@ -1076,38 +959,38 @@ pub async fn run_repl_mode(
                 h.abort();
             }
 
-            bg_wake = cron::arm_background_wake(agent.as_ref(), sid.as_deref(), &cwd);
+            bg_wake = notice::arm_background_wake(agent.as_ref(), sid.as_deref(), &cwd);
             if let Some((cards, prompt, sends)) =
-                cron::idle_wake(agent.as_ref(), sid.as_deref(), &cwd)
+                notice::idle_wake(agent.as_ref(), sid.as_deref(), &cwd)
             {
                 for card in &cards {
                     match (card, tui.as_ref()) {
-                        (cron::WakeCard::Cron(c), Some((shared, _))) => {
+                        (notice::WakeCard::Cron(c), Some((shared, _))) => {
                             let mut t = shared.lock().expect("tui lock");
-                            let (header, body) = cron::cron_card_lines(c, t.width());
+                            let (header, body) = notice::cron_card_lines(c, t.width());
                             t.push_tool_box(header, body);
                         }
-                        (cron::WakeCard::Job(j), Some((shared, _))) => {
-                            let (header, body) = cron::job_card_lines(j);
+                        (notice::WakeCard::Job(j), Some((shared, _))) => {
+                            let (header, body) = notice::job_card_lines(j);
                             shared.lock().expect("tui lock").push_tool_box(header, body);
                         }
-                        (cron::WakeCard::Job(j), None) => say(
+                        (notice::WakeCard::Job(j), None) => say(
                             None,
                             &format!(
                                 "background job {} finished ({}) after {} \u{b7} log {}",
                                 j.id, j.outcome, j.elapsed, j.log
                             ),
                         ),
-                        (cron::WakeCard::Cron(c), None) => say(
+                        (notice::WakeCard::Cron(c), None) => say(
                             None,
                             &format!(
                                 "cron: {}",
-                                crate::cron_fire::format_delivery_plain(
+                                crate::repl::notice::format_delivery_plain(
                                     &c.name, &c.body, c.reminder, c.failed
                                 )
                             ),
                         ),
-                        (cron::WakeCard::Text(text), _) => {
+                        (notice::WakeCard::Text(text), _) => {
                             say(tui.as_ref().map(|(s, _)| s), text);
                         }
                     }

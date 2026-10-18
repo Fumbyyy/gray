@@ -448,6 +448,16 @@ fn warn_missing_requires(plugins: &[Arc<dyn Plugin>]) {
     }
 }
 
+static AUTOSTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Let manifests marked `autostart` spawn at boot. Only long-lived
+/// interactive hosts (REPL, IDE) turn this on; one-shot runs, subagents and
+/// gateway child turns keep every plugin lazy so they never start background
+/// work they would kill on exit.
+pub fn set_autostart(allowed: bool) {
+    AUTOSTART.store(allowed, std::sync::atomic::Ordering::Relaxed);
+}
+
 async fn spawn_lock_plugin(
     name: &str,
     entry: &crate::lock::LockEntry,
@@ -475,6 +485,9 @@ async fn spawn_lock_plugin(
         pdir.and_then(|pd| {
             crate::lazy::cached_manifest(&pd.join(format!("{name}-manifest.json")), name)
         })
+        // autostart plugins own background work the session needs (cron
+        // ticks); they spawn eagerly like profile sidecars
+        .filter(|m| !(m.autostart && AUTOSTART.load(std::sync::atomic::Ordering::Relaxed)))
     } else {
         None
     };

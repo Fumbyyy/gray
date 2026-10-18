@@ -166,14 +166,6 @@ pub fn skills_auto_enabled_at(path: &Path) -> bool {
     load_saved_config_at(path).skills_auto.unwrap_or(true)
 }
 
-pub fn cron_auto_enabled() -> bool {
-    subsystem_enabled(|s| s.cron_auto)
-}
-
-pub fn cron_auto_enabled_at(path: &Path) -> bool {
-    subsystem_enabled_at(path, |s| s.cron_auto)
-}
-
 pub fn gw_auto_enabled() -> bool {
     subsystem_enabled(|s| s.gw_auto)
 }

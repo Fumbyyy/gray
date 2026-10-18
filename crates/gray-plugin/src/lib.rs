@@ -67,6 +67,12 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub turn_local: HashMap<String, Vec<String>>,
 
+    /// Spawn the plugin at session start instead of on first use — for
+    /// plugins that run background work the session depends on (e.g. the
+    /// gateway's cron ticker).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autostart: bool,
+
     #[serde(default)]
     pub protocol: Option<String>,
 
@@ -252,6 +258,10 @@ impl Manifest {
             commands,
             turn_local,
             hooks: str_list("hooks"),
+            autostart: v
+                .get("autostart")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
             protocol: v.get("protocol").and_then(|s| s.as_str()).map(|s| s.into()),
             subcommands: str_list("subcommands"),
             capabilities: crate::capabilities::parse_declared(&str_list("capabilities")),

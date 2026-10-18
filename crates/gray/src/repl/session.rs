@@ -151,7 +151,7 @@ pub(crate) async fn handle_resume(
                     Err(e) => {
                         let msg = format!("no session matching '{raw}': {e}");
                         if let Some(shared) = &tui {
-                            super::cron::push_notice(
+                            super::notice::push_notice(
                                 &mut shared.lock().expect("tui lock"),
                                 "Resume failed",
                                 &msg,
@@ -184,7 +184,7 @@ pub(crate) async fn handle_resume(
                     "no saved sessions in this directory (try /sessions --all or --all)"
                 };
                 if let Some(shared) = &tui {
-                    super::cron::push_notice(
+                    super::notice::push_notice(
                         &mut shared.lock().expect("tui lock"),
                         "Sessions",
                         msg,
@@ -233,7 +233,7 @@ pub(crate) async fn handle_resume(
             }
             Err(e) => {
                 if let Some(shared) = &tui {
-                    super::cron::push_notice(
+                    super::notice::push_notice(
                         &mut shared.lock().expect("tui lock"),
                         "Resume picker failed",
                         &e.to_string(),
@@ -373,7 +373,7 @@ pub(crate) async fn handle_resume(
                 Err(e) => {
                     let msg = format!("could not resume (no provider): {e}");
                     if let Some(shared) = &tui {
-                        super::cron::push_notice(
+                        super::notice::push_notice(
                             &mut shared.lock().expect("tui lock"),
                             "Resume failed",
                             &msg,
@@ -388,7 +388,7 @@ pub(crate) async fn handle_resume(
         Err(e) => {
             let msg = format!("could not resume session {}: {e}", sid.as_str());
             if let Some(shared) = &tui {
-                super::cron::push_notice(
+                super::notice::push_notice(
                     &mut shared.lock().expect("tui lock"),
                     "Resume failed",
                     &msg,
@@ -769,7 +769,7 @@ pub(crate) fn dispatch_agent_event(
                 if !details.is_empty() && t.last_retry_detail.as_deref() != Some(details.as_str()) {
                     t.last_retry_detail = Some(details.clone());
                     let trunc = crate::repl::format::truncate_chars(details, 200);
-                    super::cron::push_notice(&mut t, "Reconnecting", trunc, false);
+                    super::notice::push_notice(&mut t, "Reconnecting", trunc, false);
                 }
             }
 
