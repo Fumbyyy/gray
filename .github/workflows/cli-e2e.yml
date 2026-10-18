@@ -59,7 +59,7 @@ jobs:
       - name: Run gray unit tests
         env:
           RUST_BACKTRACE: 1
-        run: cargo test --locked -p gray
+        run: cargo test --locked -p gray --lib --bins
       - name: Run CLI end-to-end tests
         env:
           GRAY_TEST_BIN: ${{ github.workspace }}/${{ matrix.bin }}
