@@ -188,8 +188,22 @@ impl Gray {
     }
 
     fn send(&self, text: &str) {
-        self.type_text(text);
+        for _ in 0..20 {
+            self.type_text(text);
+            if self.state()["composer"] == text {
+                break;
+            }
+            self.key("ctrl+a");
+            self.key("BackSpace");
+            sleep(Duration::from_millis(120));
+        }
+        assert_eq!(
+            self.state()["composer"],
+            text,
+            "composer did not receive typed text"
+        );
         self.key("Return");
+        self.wait_for("composer submit", |s| s["composer"] == "");
     }
 
     fn palette(&self, query: &str) {

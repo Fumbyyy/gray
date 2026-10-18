@@ -1958,7 +1958,7 @@ impl GrayApp {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(div().text_3xl().font_bold().child("Gray"))
+                .child(div().text_3xl().font_family("Brygada 1918").child("Gray"))
                 .child(div().text_color(t.muted_foreground).child(match project {
                     Some(p) => format!("What should we build in {p}?"),
                     None => "Open a project to get started".to_string(),
@@ -2831,6 +2831,8 @@ fn hex(v: u32) -> Hsla {
 pub fn apply_brand(cx: &mut App) {
     let dark = cx.theme().mode.is_dark();
     let t = Theme::global_mut(cx);
+    t.font_family = "Plus Jakarta Sans".into();
+    t.mono_font_family = "Departure Mono".into();
     let accent = hex(0xd4a373);
     t.primary = accent;
     t.primary_hover = hex(0xdfb891);

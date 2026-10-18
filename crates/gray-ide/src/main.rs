@@ -35,6 +35,22 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             app::bind_keys(cx);
+            cx.text_system()
+                .add_fonts(vec![
+                    std::borrow::Cow::Borrowed(include_bytes!(
+                        "../fonts/PlusJakartaSans-Variable.ttf"
+                    ) as &[u8]),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/DepartureMono-Regular.ttf") as &[u8],
+                    ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/Brygada1918-Regular.ttf") as &[u8]
+                    ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/Brygada1918-Italic.ttf") as &[u8]
+                    ),
+                ])
+                .expect("load gray fonts");
             app::apply_brand(cx);
             let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1440.), px(900.)));
             let opts = WindowOptions {
