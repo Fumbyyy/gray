@@ -216,7 +216,8 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                 Some(CommandOutcome::ModelPicker(_))
                 | Some(CommandOutcome::SubagentSettings(_))
                 | Some(CommandOutcome::Panel(_))
-                | Some(CommandOutcome::Picker(_)) => {
+                | Some(CommandOutcome::Picker(_))
+                | Some(CommandOutcome::Terminal { .. }) => {
                     // Pickers and settings mutate session state and own the
                     // modal surface — rerun through the full dispatch once
                     // the turn ends instead of racing the running turn.
@@ -246,6 +247,34 @@ fn lock_tui<T>(shared: &std::sync::Arc<std::sync::Mutex<T>>) -> std::sync::Mutex
     shared.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The keyboard-enhancement push/pop writes raw escapes to stdout; on this
+/// thread they race the composer's draws and a torn `\x1b[>5u` leaks its
+/// tail as literal text. Run both under the tui lock.
+struct LockedEnhancement {
+    inner: Option<crate::term_keys::KeyboardEnhancementGuard>,
+    tui: TuiOpt,
+}
+
+impl LockedEnhancement {
+    fn push(tui: TuiOpt) -> Self {
+        let inner = {
+            let _tui = tui.as_ref().map(|s| lock_tui(s));
+            crate::term_keys::KeyboardEnhancementGuard::push()
+        };
+        Self {
+            inner: Some(inner),
+            tui,
+        }
+    }
+}
+
+impl Drop for LockedEnhancement {
+    fn drop(&mut self) {
+        let _tui = self.tui.as_ref().map(|s| lock_tui(s));
+        drop(self.inner.take());
+    }
+}
+
 pub(crate) fn spawn_key_watcher_with_typing(
     watch_cancel: Cancel,
     watcher_stopped: Stop,
@@ -256,7 +285,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
     tokio::task::spawn_blocking(move || {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
 
-        let _keyboard_enhancement = crate::term_keys::KeyboardEnhancementGuard::push();
+        let _keyboard_enhancement = LockedEnhancement::push(watcher_tui.clone());
         crate::composer::input::watch_dead_stdin();
         loop {
             if watcher_stopped.load(std::sync::atomic::Ordering::Relaxed) {
