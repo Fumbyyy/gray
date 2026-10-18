@@ -1845,6 +1845,9 @@ fn merged_models_cache(
 }
 
 pub fn save_models_cache_to_disk() {
+    if cfg!(test) {
+        return;
+    }
     let Some(path) = models_cache_path() else {
         return;
     };
