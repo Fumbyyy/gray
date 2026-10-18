@@ -221,6 +221,7 @@ pub(crate) async fn dispatch_command(
             if let Some((shared, _)) = tui {
                 let mut t = shared.lock().expect("tui lock");
                 t.reset_usage();
+                t.start_fresh_conversation();
                 let detail = if !short_id.is_empty() {
                     Some(format!("({short_id})"))
                 } else {

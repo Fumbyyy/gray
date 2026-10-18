@@ -1161,6 +1161,12 @@ impl Tui {
         true
     }
 
+    pub(crate) fn start_fresh_conversation(&mut self) {
+        self.history_entries = vec![TranscriptEntry::Welcome];
+        self.left_home = false;
+        self.reflow_on_resize(self.last_width);
+    }
+
     pub fn set_model(&mut self, model: String) {
         self.model_name = model;
     }
@@ -1812,5 +1818,9 @@ mod compaction_tests;
 #[path = "mod_palette_tests.rs"]
 #[cfg(test)]
 mod palette_tests;
+
+#[path = "mod_fresh_conversation_tests.rs"]
+#[cfg(test)]
+mod fresh_conversation_tests;
 
 mod background;
