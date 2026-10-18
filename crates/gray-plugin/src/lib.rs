@@ -21,6 +21,7 @@ pub mod sidecar;
 
 pub use lazy::{LazySidecarPlugin, cached_manifest, lazy_enabled};
 pub use live::LiveRegistry;
+pub use sidecar::{refresh_dynamic_tools, set_active_model};
 
 pub use sidecar::{
     ASK_HANDLER_TTL, ASK_TTL, HOST_ASK, HOST_RUN, HOST_SAY, HOST_TTL, HostHandler, SidecarPlugin,
@@ -74,8 +75,35 @@ pub struct Manifest {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderDecl>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composite_rows: Vec<CompositeRowDecl>,
     #[serde(skip)]
     pub provider_errors: Vec<ProviderValidationError>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompositeRowDecl {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub slots: Vec<CompositeSlotDecl>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompositeSlotDecl {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub source: CompositeSource,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompositeSource {
+    #[default]
+    Own,
+    All,
 }
 
 pub fn parse_tool_entry(v: &Value) -> Option<ToolDef> {
@@ -187,6 +215,10 @@ impl Manifest {
             capabilities: crate::capabilities::parse_declared(&str_list("capabilities")),
             requires_plugins: str_list("requires_plugins"),
             providers,
+            composite_rows: serde_json::from_value(
+                v.get("composite_rows").cloned().unwrap_or_default(),
+            )
+            .unwrap_or_default(),
             provider_errors,
         }
     }

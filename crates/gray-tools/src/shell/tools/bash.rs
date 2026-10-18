@@ -1021,6 +1021,7 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
         is_error: false,
         images,
         media,
+        usage: None,
     })
 }
 

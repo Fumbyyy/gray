@@ -81,6 +81,9 @@ pub struct ToolOutput {
 
     #[serde(default, alias = "videos")]
     pub media: Vec<AttachedMedia>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Box<Usage>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +108,7 @@ impl ToolOutput {
             is_error: false,
             images: Vec::new(),
             media: Vec::new(),
+            usage: None,
         }
     }
     pub fn error(content: impl Into<String>) -> Self {
@@ -113,6 +117,7 @@ impl ToolOutput {
             is_error: true,
             images: Vec::new(),
             media: Vec::new(),
+            usage: None,
         }
     }
 
@@ -122,6 +127,7 @@ impl ToolOutput {
             is_error: false,
             images: vec![AttachedImage { media_type, data }],
             media: Vec::new(),
+            usage: None,
         }
     }
 

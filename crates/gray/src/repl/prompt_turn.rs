@@ -166,6 +166,7 @@ pub(crate) async fn run_prompt_turn(
     *TURN_STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel.clone());
 
     let _turn_in_flight = super::mark_turn_in_flight();
+    super::session::ensure_session_state(session_state, config, cwd).await;
     let ctx = ToolContext {
         cwd: cwd.to_path_buf(),
         cancel: cancel.clone(),

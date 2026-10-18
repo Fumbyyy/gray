@@ -574,6 +574,7 @@ impl ReadTool {
             is_error: any_error,
             images,
             media: Vec::new(),
+            usage: None,
         })
     }
 }

@@ -20,7 +20,7 @@ use crate::{
     CoreEvent, DYNAMIC_PROTOCOL, Manifest, PROVIDER_CREDENTIALS, Plugin, ProviderAuthPoll,
     ProviderAuthStart, ProviderChatRequest, ProviderChatResult, ProviderModelCatalog,
     ProviderModelsRequest, ProviderRefreshRequest, ProviderRevokeRequest, ProviderRevokeResult,
-    ProviderRpcError, ToolBefore, manifest_tools,
+    ProviderRpcError, ToolBefore,
 };
 
 pub type HostHandler = Arc<
@@ -51,7 +51,25 @@ pub const ASK_TTL: Duration = Duration::from_secs(330);
 pub const ASK_HANDLER_TTL: Duration = Duration::from_secs(300);
 
 fn session_json(id: &str, cwd: &str) -> Value {
-    json!({"id": id, "cwd": cwd})
+    let mut v = json!({"id": id, "cwd": cwd});
+    if let Some(m) = active_model() {
+        v["model"] = m;
+    }
+    v
+}
+
+static ACTIVE_MODEL: std::sync::OnceLock<std::sync::RwLock<Value>> = std::sync::OnceLock::new();
+
+pub fn set_active_model(model: Value) {
+    let cell = ACTIVE_MODEL.get_or_init(|| std::sync::RwLock::new(Value::Null));
+    *cell.write().unwrap_or_else(|e| e.into_inner()) = model;
+}
+
+fn active_model() -> Option<Value> {
+    ACTIVE_MODEL
+        .get()
+        .and_then(|c| c.read().ok().map(|g| g.clone()))
+        .filter(|v| !v.is_null())
 }
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -570,10 +588,24 @@ impl Transport {
 }
 
 fn build_tools(transport: &Arc<Transport>, tools: &Value, asks: bool) -> Vec<Arc<dyn Tool>> {
-    manifest_tools(&json!({"tools": tools}))
-        .into_iter()
-        .map(|entry| Arc::new(SidecarTool::new(entry, transport.clone(), asks)) as Arc<dyn Tool>)
-        .collect()
+    tools
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|raw| {
+                    let def = crate::parse_tool_entry(raw)?;
+                    let timeout_secs = raw
+                        .get("timeout_secs")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n.min(21600));
+                    Some(
+                        Arc::new(SidecarTool::new(def, transport.clone(), asks, timeout_secs))
+                            as Arc<dyn Tool>,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn refresh_tools_into(
@@ -582,7 +614,11 @@ async fn refresh_tools_into(
     asks: bool,
 ) -> anyhow::Result<usize> {
     let r = transport
-        .request("plugin/tools", Some(json!({})), HOST_TTL)
+        .request(
+            "plugin/tools",
+            Some(json!({"session": session_json("", "")})),
+            HOST_TTL,
+        )
         .await?;
     let new = build_tools(transport, r.get("tools").unwrap_or(&Value::Null), asks);
     let n = new.len();
@@ -646,6 +682,24 @@ impl SidecarPlugin {
         };
         if dynamic {
             plugin.install_tools_changed_handler();
+            {
+                let transport = Arc::downgrade(&plugin.transport);
+                let tools = Arc::downgrade(&plugin.tools);
+                let asks = plugin.asks;
+                let name = plugin.manifest.name.clone();
+                dynamic_refreshers().push(Arc::new(move || {
+                    let (Some(t), Some(tl)) = (transport.upgrade(), tools.upgrade()) else {
+                        return Box::pin(async { false });
+                    };
+                    let name = name.clone();
+                    Box::pin(async move {
+                        if let Err(e) = refresh_tools_into(&t, &tl, asks).await {
+                            log::warn!(target: "gray_plugin", "{name}: plugin/tools refresh failed: {e}");
+                        }
+                        true
+                    })
+                }));
+            }
 
             let transport = Arc::downgrade(&plugin.transport);
             let tools = Arc::downgrade(&plugin.tools);
@@ -1336,14 +1390,16 @@ struct SidecarTool {
     transport: Arc<Transport>,
 
     asks: bool,
+    timeout_secs: Option<u64>,
 }
 
 impl SidecarTool {
-    fn new(def: ToolDef, transport: Arc<Transport>, asks: bool) -> Self {
+    fn new(def: ToolDef, transport: Arc<Transport>, asks: bool, timeout_secs: Option<u64>) -> Self {
         Self {
             def,
             transport,
             asks,
+            timeout_secs,
         }
     }
 
@@ -1362,24 +1418,59 @@ impl Tool for SidecarTool {
     }
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
         let name = self.def.name.clone();
-        let cwd = ctx.cwd.to_string_lossy();
+        let cwd = ctx.cwd.to_string_lossy().into_owned();
         let sid = ctx.session_id.as_deref().unwrap_or("");
         log::debug!(target: "gray_plugin", "plugin tool call: {name} (plugin-provided, session {sid})");
         let params = json!({"name": name, "args": args, "session": session_json(sid, &cwd)});
-        let ttl = if self.transport_asks() {
-            ASK_TTL
-        } else {
-            HOST_TTL
+        let ttl = self
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| {
+                if self.transport_asks() {
+                    ASK_TTL
+                } else {
+                    HOST_TTL
+                }
+            });
+        let transport = self.transport.clone();
+        let cancel = ctx.cancel.clone();
+        let call =
+            tokio::spawn(async move { transport.request("tool/call", Some(params), ttl).await });
+        let outcome = tokio::select! {
+            r = call => r.unwrap_or_else(|e| Err(anyhow::anyhow!("sidecar task join failed: {e}"))),
+            _ = cancel.cancelled() => {
+                let name = self.def.name.clone();
+                let cwd = ctx.cwd.to_string_lossy().into_owned();
+                let sid = ctx.session_id.as_deref().unwrap_or("").to_string();
+                let t = self.transport.clone();
+                tokio::spawn(async move {
+                    t.send_notification(
+                        "tool/cancel",
+                        json!({"name": name, "session": session_json(&sid, &cwd)}),
+                    )
+                    .await;
+                });
+                return ToolOutput::error("cancelled by user");
+            }
         };
-        match self.transport.request("tool/call", Some(params), ttl).await {
+        match outcome {
             Ok(v) => {
                 let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
                 let content = v.get("content").and_then(|c| c.as_str());
+                let usage = v
+                    .get("usage")
+                    .and_then(|u| serde_json::from_value::<gray_core::event::Usage>(u.clone()).ok())
+                    .map(Box::new);
                 match (is_error, content) {
-                    (true, c) => gray_core::tool_out::fail(c.unwrap_or_default().to_string()),
+                    (true, c) => {
+                        let mut out = gray_core::tool_out::fail(c.unwrap_or_default().to_string());
+                        out.usage = usage;
+                        out
+                    }
                     (false, Some(c)) => {
                         let mut out = gray_core::tool_out::finish(c.to_string());
                         attach_media(&name, &mut out, &v);
+                        out.usage = usage;
                         out
                     }
 
@@ -1459,3 +1550,43 @@ pub(crate) fn command_outcome(v: &Value) -> Option<CommandOutcome> {
 #[path = "sidecar_tests.rs"]
 #[cfg(test)]
 mod tests;
+
+type DynRefresher = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync,
+>;
+
+fn dynamic_refreshers() -> std::sync::MutexGuard<'static, Vec<DynRefresher>> {
+    static REFRESHERS: std::sync::OnceLock<std::sync::Mutex<Vec<DynRefresher>>> =
+        std::sync::OnceLock::new();
+    REFRESHERS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+pub async fn refresh_dynamic_tools() {
+    let fns: Vec<DynRefresher> = dynamic_refreshers().clone();
+    let mut set = tokio::task::JoinSet::new();
+    for (i, f) in fns.iter().enumerate() {
+        let f = f.clone();
+        set.spawn(async move {
+            let alive = tokio::time::timeout(std::time::Duration::from_secs(3), f())
+                .await
+                .unwrap_or(true);
+            (i, alive)
+        });
+    }
+    let mut alive = vec![true; fns.len()];
+    while let Some(res) = set.join_next().await {
+        if let Ok((i, a)) = res {
+            alive[i] = a;
+        }
+    }
+    let n = fns.len();
+    let mut idx = 0;
+    dynamic_refreshers().retain(|_| {
+        let keep = idx >= n || alive[idx];
+        idx += 1;
+        keep
+    });
+}

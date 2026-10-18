@@ -291,6 +291,13 @@ impl Agent {
         self.run_inner(ctx, Some(on_event)).await
     }
 
+    fn bill_tool_usage(billed: &mut Usage, name: &str, output: &ToolOutput, session: Option<&str>) {
+        if let Some(u) = output.usage.as_deref().filter(|u| u.any()) {
+            billed.accumulate(u);
+            u.log_request(&format!("tool:{name}"), session);
+        }
+    }
+
     async fn apply_tool_after(&self, name: &str, output: &ToolOutput) -> ToolOutput {
         let mut output = output.clone();
         for hook in &self.hooks {
@@ -1299,6 +1306,12 @@ impl Agent {
                         match by_idx.get(&idx) {
                             Some(Some(output)) => {
                                 let output = self.apply_tool_after(name, output).await;
+                                Self::bill_tool_usage(
+                                    &mut billed,
+                                    name,
+                                    &output,
+                                    ctx.session_id.as_deref(),
+                                );
                                 for hook in &self.hooks {
                                     hook.post_tool(name, &output).await;
                                 }
@@ -1387,6 +1400,7 @@ impl Agent {
                             Err(_) => ToolOutput::error("cancelled by user"),
                         };
                         let report = self.apply_tool_after(name, &report).await;
+                        Self::bill_tool_usage(&mut billed, name, &report, ctx.session_id.as_deref());
                         for hook in &self.hooks {
                             hook.post_tool(name, &report).await;
                         }
@@ -1411,6 +1425,7 @@ impl Agent {
                     },
                 };
                 let output = self.apply_tool_after(name, &output).await;
+                Self::bill_tool_usage(&mut billed, name, &output, ctx.session_id.as_deref());
                 for hook in &self.hooks {
                     hook.post_tool(name, &output).await;
                 }
