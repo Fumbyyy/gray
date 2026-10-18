@@ -191,6 +191,9 @@ fn cache_warm_policy(
         log::info!(target: "gray_agent",
             "cache warm disabled: provider is plugin-credentialed without request.warm_replay");
     }
+    if config.uses_plugin_credentials() && plugin_warm_replay {
+        log::info!(target: "gray_agent", "cache warm enabled: plugin declares request.warm_replay");
+    }
     if config.bare || !cacheable || std::env::var_os("GRAY_NO_CACHE_WARM").is_some() {
         return None;
     }

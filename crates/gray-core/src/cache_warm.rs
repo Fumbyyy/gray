@@ -104,6 +104,7 @@ pub fn worth_refreshing(
 pub(crate) struct WarmHint {
     pub(crate) prompt_tokens: usize,
     pub(crate) cache_reported: bool,
+    pub(crate) warm_off: bool,
 }
 
 pub(crate) async fn keep_warm(
@@ -144,7 +145,11 @@ pub(crate) async fn keep_warm(
         let WarmHint {
             prompt_tokens,
             cache_reported,
+            warm_off,
         } = hint.lock().map(|h| *h).unwrap_or_default();
+        if warm_off {
+            return;
+        }
         if !worth_refreshing(
             (policy.prices)().as_ref(),
             prompt_tokens,
@@ -168,6 +173,17 @@ pub(crate) async fn keep_warm(
                     log::debug!(target: "gray_agent", "cache warm: refreshed {} prompt tokens", usage.input_tokens);
                     if let Ok(mut total) = spent.lock() {
                         total.accumulate(&usage);
+                    }
+                    let cached = usage.cached_tokens.max(usage.cache_read_input_tokens);
+                    if cache_reported
+                        && usage.input_tokens >= MIN_WARM_TOKENS
+                        && cached * 2 < usage.input_tokens
+                    {
+                        log::warn!(target: "gray_agent", "cache warm: refresh read {cached} of {} prompt tokens from cache; warming off for this session", usage.input_tokens);
+                        if let Ok(mut h) = hint.lock() {
+                            h.warm_off = true;
+                        }
+                        return;
                     }
                 }
                 Err(e) => {
