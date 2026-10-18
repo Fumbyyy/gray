@@ -1060,8 +1060,7 @@ impl GrayApp {
             }
             Cmd::DiscardChanges => {
                 let before = self.tabs.len();
-                self.tabs
-                    .retain(|t| t.editor.read(cx).value() == t.saved);
+                self.tabs.retain(|t| t.editor.read(cx).value() == t.saved);
                 let dropped = before - self.tabs.len();
                 self.active_tab = self.active_tab.filter(|i| *i < self.tabs.len());
                 self.toast(
