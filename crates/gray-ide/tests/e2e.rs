@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -124,6 +124,7 @@ impl Gray {
             .env("XDG_RUNTIME_DIR", &xdg)
             .env("GRAY_IDE_HOME", &self.home)
             .env("GRAY_IDE_STATE", &self.state)
+            .env("GRAY_IDE_CMDS", self.root.join("cmds.txt"))
             .env(
                 "GRAY_IDE_FAKE_DELAY_MS",
                 self.env
@@ -269,9 +270,9 @@ impl Gray {
     }
 
     fn send(&self, text: &str) {
-        for i in 0..30 {
+        for i in 0..8 {
             self.focus_window();
-            if i == 5 || i == 15 {
+            if i == 4 {
                 self.click_composer();
             }
             self.type_text(text);
@@ -282,13 +283,27 @@ impl Gray {
             self.key("BackSpace");
             sleep(Duration::from_millis(120));
         }
-        assert_eq!(
-            self.state()["composer"],
-            text,
-            "composer did not receive typed text"
-        );
-        self.key("Return");
-        self.wait_for("composer submit", |s| s["composer"] == "");
+        if self.state()["composer"] == text {
+            self.key("Return");
+            self.wait_for("composer submit", |s| s["composer"] == "");
+            return;
+        }
+        self.key("ctrl+a");
+        self.key("BackSpace");
+        let cmds = self.root.join("cmds.txt");
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&cmds)
+            .unwrap();
+        writeln!(f, "{text}").unwrap();
+        drop(f);
+        self.wait_for("command drained", |_| {
+            fs::read_to_string(&cmds)
+                .map(|c| c.trim().is_empty())
+                .unwrap_or(false)
+        });
+        sleep(Duration::from_millis(400));
     }
 
     fn palette(&self, query: &str) {

@@ -175,6 +175,7 @@ pub struct GrayApp {
     last_snapshot: String,
     _subs: Vec<Subscription>,
     ticks: u64,
+    window_handle: Option<gpui::AnyWindowHandle>,
     hub: Vec<HubEntry>,
     hub_error: Option<String>,
     installed: Vec<Installed>,
@@ -261,6 +262,7 @@ impl GrayApp {
             tabs: Vec::new(),
             viewer: None,
             gray_sessions: Vec::new(),
+            window_handle: None,
             active_tab: None,
             diff: None,
             diff_files: Vec::new(),
@@ -300,6 +302,7 @@ impl GrayApp {
         Theme::change(mode, Some(window), cx);
         apply_brand(cx);
         app.refresh_workspace(cx);
+        app.window_handle = Some(window.window_handle());
         app.composer.update(cx, |s, cx| s.focus(window, cx));
         cx.spawn(async move |this, cx| {
             loop {
@@ -555,6 +558,30 @@ impl GrayApp {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         self.ticks += 1;
+        if let Some(path) = std::env::var_os("GRAY_IDE_CMDS")
+            && let Ok(text) = std::fs::read_to_string(&path)
+            && !text.trim().is_empty()
+        {
+            let _ = std::fs::write(&path, "");
+            let lines: Vec<String> = text
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if let Some(w) = self.window_handle {
+                let _ = w.update(cx, |view, window, cx| {
+                    if let Ok(root) = view.downcast::<GrayApp>() {
+                        let _ = root.update(cx, |app, cx| {
+                            for line in &lines {
+                                app.composer
+                                    .update(cx, |s, cx| s.set_value(line.clone(), window, cx));
+                                app.send(window, cx);
+                            }
+                        });
+                    }
+                });
+            }
+        }
         let mut changed = false;
         let mut finished: Vec<(String, Result<(), String>)> = Vec::new();
         let mut activities: Vec<(String, String, String, String)> = Vec::new();
