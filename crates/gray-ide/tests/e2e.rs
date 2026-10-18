@@ -909,7 +909,7 @@ fn gray_sessions_panel_lists_and_resumes() {
         return;
     };
     g.send("/sessions");
-    let s = g.wait_for("sessions listed", |s| {
+    let _s = g.wait_for("sessions listed", |s| {
         s["panel"] == "Sessions" && s["gray_sessions"].to_string().contains("test-session-01")
     });
     g.screenshot("sessions-panel");
