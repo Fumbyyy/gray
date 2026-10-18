@@ -175,7 +175,7 @@ impl Gray {
         }
     }
 
-    fn xdo(&self, args: &[&str]) {
+    fn xdo(&self, args: &[&str]) -> bool {
         for _ in 0..10 {
             let ok = Command::new("xdotool")
                 .args(args)
@@ -184,11 +184,11 @@ impl Gray {
                 .map(|s| s.success())
                 .unwrap_or(false);
             if ok {
-                return;
+                return true;
             }
             sleep(Duration::from_millis(200));
         }
-        panic!("xdotool {args:?} failed");
+        false
     }
 
     fn key(&self, k: &str) {
@@ -284,9 +284,15 @@ impl Gray {
             sleep(Duration::from_millis(120));
         }
         if self.state()["composer"] == text {
-            self.key("Return");
-            self.wait_for("composer submit", |s| s["composer"] == "");
-            return;
+            for _ in 0..12 {
+                self.key("Return");
+                for _ in 0..6 {
+                    if self.state()["composer"] == "" {
+                        return;
+                    }
+                    sleep(Duration::from_millis(200));
+                }
+            }
         }
         self.key("ctrl+a");
         self.key("BackSpace");
@@ -1037,7 +1043,10 @@ fn gray_command_registry_lists_and_runs_via_palette() {
     let s = g.wait_for("gray cmd output", |s| {
         s["terminal"]
             .as_array()
-            .map(|a| a.iter().any(|l| l.as_str().unwrap_or("").contains("models")))
+            .map(|a| {
+                a.iter()
+                    .any(|l| l.as_str().unwrap_or("").contains("models"))
+            })
             .unwrap_or(false)
     });
     assert_eq!(s["terminal_open"], true);

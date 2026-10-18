@@ -127,7 +127,7 @@ enum Cmd {
     ToggleSessions,
     ResumeSession(String),
     DiscardChanges,
-    GrayCmd(String),
+    Gray(String),
 }
 
 struct ActiveTurn {
@@ -559,7 +559,7 @@ impl GrayApp {
             "view" | "preview" => Cmd::PreviewFile(arg),
             "sessions" => Cmd::ToggleSessions,
             "resume" => Cmd::ResumeSession(arg),
-            "gray" => Cmd::GrayCmd(arg),
+            "gray" => Cmd::Gray(arg),
             _ => {
                 self.toast(format!("Unknown command /{name}"), true);
                 cx.notify();
@@ -835,7 +835,7 @@ impl GrayApp {
             ));
         }
         for (n, d) in &self.gray_cmds {
-            items.push((format!("gray: {n}"), d.clone(), Cmd::GrayCmd(n.clone())));
+            items.push((format!("gray: {n}"), d.clone(), Cmd::Gray(n.clone())));
         }
         for h in &self.hub {
             items.push((
@@ -1093,7 +1093,7 @@ impl GrayApp {
                     self.configure(None, None, Some(m));
                 }
             }
-            Cmd::GrayCmd(name) => {
+            Cmd::Gray(name) => {
                 self.terminal_open = true;
                 self.run_terminal(format!("{} cmd run {name}", graycmds::bin()), cx);
             }
