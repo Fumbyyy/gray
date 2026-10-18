@@ -545,12 +545,17 @@ impl Agent {
                 hint.prompt_tokens = self.estimate_tokens();
                 hint.cache_reported = self.warm_cache_reported;
             }
-            if self.cache_warm.is_some() {
-                if let Some(prev) = self.warm_run.take()
-                    && let Ok(spent) = prev.spent.lock()
-                {
-                    billed.accumulate(&spent);
-                }
+            let warm_off = self
+                .warm_hint
+                .lock()
+                .map(|hint| hint.warm_off)
+                .unwrap_or(false);
+            if let Some(prev) = self.warm_run.take()
+                && let Ok(spent) = prev.spent.lock()
+            {
+                billed.accumulate(&spent);
+            }
+            if self.cache_warm.is_some() && !warm_off {
                 let warm_spent = std::sync::Arc::new(std::sync::Mutex::new(Usage::default()));
                 let phase = crate::cache_warm::warm_phase();
                 self.warm_run = Some(crate::cache_warm::ActiveWarm {
