@@ -2847,6 +2847,7 @@ pub fn apply_brand(cx: &mut App) {
     if !dark {
         t.primary_foreground = hex(0x050506);
         t.button_primary_foreground = hex(0x050506);
+        t.tokens = gpui_kit::component::ThemeTokens::from(&t.colors);
         return;
     }
     t.background = hex(0x050506);
@@ -2876,4 +2877,5 @@ pub fn apply_brand(cx: &mut App) {
     t.selection = hex(0x3a3a42);
     t.primary_foreground = hex(0x050506);
     t.button_primary_foreground = hex(0x050506);
+    t.tokens = gpui_kit::component::ThemeTokens::from(&t.colors);
 }
