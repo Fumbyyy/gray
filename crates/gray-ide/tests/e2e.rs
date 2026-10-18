@@ -889,3 +889,32 @@ fn code_viewer_previews_file_and_background_in_palette() {
     assert!(s["palette_items"].to_string().contains("Background: None"));
     g.key("Escape");
 }
+
+#[test]
+fn gray_sessions_panel_lists_and_resumes() {
+    let gh = std::env::temp_dir().join("gray-e2e-gh");
+    let sd = gh.join("sessions");
+    fs::create_dir_all(&sd).unwrap();
+    fs::write(
+        sd.join("test-session-01.jsonl"),
+        "{\"version\":1,\"id\":\"test-session-01\",\"timestamp\":1792331615438,\"cwd\":\"/tmp/proj\",\"model\":\"mock\",\"origin\":\"print\"}\n{\"entry_id\":0,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"earlier conversation\"}]}}\n",
+    )
+    .unwrap();
+    fs::write(sd.join("test-session-01.open"), "").unwrap();
+    let Some(g) = Gray::start_with(
+        "gsessions",
+        "fake",
+        vec![("GRAY_HOME".into(), gh.display().to_string())],
+    ) else {
+        return;
+    };
+    g.send("/sessions");
+    let s = g.wait_for("sessions listed", |s| {
+        s["panel"] == "Sessions" && s["gray_sessions"].to_string().contains("test-session-01")
+    });
+    g.screenshot("sessions-panel");
+    g.send("/resume test-session-01");
+    g.wait_for("resumed", |s| {
+        s["thread"]["session"] == "test-session-01" && s["thread"]["provider"] == "gray"
+    });
+}

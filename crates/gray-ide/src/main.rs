@@ -3,6 +3,7 @@ mod assets;
 mod git;
 mod plugins;
 mod provider;
+mod sessions;
 mod store;
 mod workspace;
 

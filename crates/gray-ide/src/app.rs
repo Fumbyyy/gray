@@ -1,6 +1,7 @@
 use crate::git;
 use crate::plugins::{self, HubEntry, Installed, PluginMsg};
 use crate::provider::{self, MODES, PROVIDERS, ProviderEvent, Turn, TurnRequest};
+use crate::sessions::{self, GraySession};
 use crate::store::{Event, Item, Role, Store, new_id, now};
 use crate::workspace::{self, FileEntry};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -76,6 +77,7 @@ enum Panel {
     Diff,
     Plugins,
     Viewer,
+    Sessions,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -121,6 +123,8 @@ enum Cmd {
     SetBackground(String),
     ToggleViewer,
     PreviewFile(String),
+    ToggleSessions,
+    ResumeSession(String),
 }
 
 struct ActiveTurn {
@@ -159,6 +163,7 @@ pub struct GrayApp {
     tree: Vec<FileEntry>,
     tabs: Vec<Tab>,
     viewer: Option<(String, Entity<EditorState>)>,
+    gray_sessions: Vec<GraySession>,
     active_tab: Option<usize>,
     diff: Option<Entity<DiffState>>,
     diff_files: Vec<String>,
@@ -254,6 +259,7 @@ impl GrayApp {
             tree: Vec::new(),
             tabs: Vec::new(),
             viewer: None,
+            gray_sessions: Vec::new(),
             active_tab: None,
             diff: None,
             diff_files: Vec::new(),
@@ -525,6 +531,8 @@ impl GrayApp {
             "effort" => Cmd::Effort(arg),
             "background" | "bg" => Cmd::SetBackground(arg),
             "view" | "preview" => Cmd::PreviewFile(arg),
+            "sessions" => Cmd::ToggleSessions,
+            "resume" => Cmd::ResumeSession(arg),
             _ => {
                 self.toast(format!("Unknown command /{name}"), true);
                 cx.notify();
@@ -754,6 +762,14 @@ impl GrayApp {
         items.push((k("Toggle theme"), k("Ctrl+Shift+L"), Cmd::ToggleTheme));
         items.push((k("Create checkpoint"), k("Git"), Cmd::Checkpoint));
         items.push((k("Plugins"), k("Ctrl+Shift+P"), Cmd::TogglePlugins));
+        items.push((k("Sessions"), k("Gray"), Cmd::ToggleSessions));
+        for gs in self.gray_sessions.iter().take(10) {
+            items.push((
+                format!("Resume session: {}", gs.id),
+                k("Gray"),
+                Cmd::ResumeSession(gs.id.clone()),
+            ));
+        }
         items.push((k("Code viewer"), k("Ctrl+Shift+V"), Cmd::ToggleViewer));
         for b in [
             ("none", "None"),
@@ -1208,6 +1224,39 @@ impl GrayApp {
                     self.preview_file(&rel, window, cx);
                 }
             }
+            Cmd::ToggleSessions => {
+                self.panel = if self.panel == Some(Panel::Sessions) {
+                    None
+                } else {
+                    Some(Panel::Sessions)
+                };
+                self.gray_sessions = sessions::list();
+            }
+            Cmd::ResumeSession(id) => {
+                let Some(tid) = self.create_thread(cx) else {
+                    return;
+                };
+                let model = self
+                    .store
+                    .state
+                    .setting("default_model.gray", &provider::default_model("gray"));
+                self.store.append(Event::ThreadConfigured {
+                    id: tid.clone(),
+                    provider: "gray".into(),
+                    model,
+                    mode: "full".into(),
+                });
+                self.store.append(Event::ThreadSession {
+                    id: tid.clone(),
+                    provider: "gray".into(),
+                    session: id.clone(),
+                });
+                self.store.append(Event::ThreadRenamed {
+                    id: tid,
+                    title: format!("gray/{id}"),
+                });
+                self.toast(format!("Resuming {id}"), false);
+            }
             Cmd::SetBackground(b) => {
                 self.store.append(Event::SettingChanged {
                     key: "background".into(),
@@ -1425,6 +1474,7 @@ impl GrayApp {
             "theme": cx.theme().mode.name(),
             "background": self.store.state.setting("background", "none"),
             "viewer": self.viewer.as_ref().map(|(p, _)| p.clone()),
+            "gray_sessions": self.gray_sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
             "project": self.active_project.as_ref().and_then(|p| self.store.state.project(p)).map(|p| serde_json::json!({"name": p.name, "path": p.path})),
             "projects": self.store.state.projects.len(),
             "thread": thread.map(|t| serde_json::json!({"id": t.id, "title": t.title, "provider": t.provider, "model": t.model, "mode": t.mode, "pinned": t.pinned, "settled": t.settled, "snoozed": t.snoozed_until > now(), "worktree": t.worktree, "effort": t.effort, "session": t.session.as_ref().map(|s| s.1.clone())})),
@@ -2357,6 +2407,18 @@ impl GrayApp {
                     })),
             )
             .child(
+                Button::new("panel-sessions")
+                    .ghost()
+                    .small()
+                    .label("Sessions")
+                    .selected(panel == Panel::Sessions)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.panel = Some(Panel::Sessions);
+                        this.gray_sessions = sessions::list();
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("panel-viewer")
                     .ghost()
                     .small()
@@ -2413,6 +2475,7 @@ impl GrayApp {
                     })),
             );
         let body: AnyElement = match panel {
+            Panel::Sessions => self.render_sessions(cx).into_any_element(),
             Panel::Viewer => self.render_viewer(cx).into_any_element(),
             Panel::Plugins => self.render_plugins(cx).into_any_element(),
             Panel::Diff => match &self.diff {
@@ -2788,6 +2851,101 @@ impl GrayApp {
 }
 
 impl GrayApp {
+    fn render_sessions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let mut rows = v_flex().gap_0p5();
+        for gs in &self.gray_sessions {
+            let id = gs.id.clone();
+            rows = rows.child(
+                h_flex()
+                    .id(SharedString::from(format!("gsession-{}", gs.id)))
+                    .px_3()
+                    .py_2()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .font_family(t.mono_font_family.clone())
+                                            .text_xs()
+                                            .child(gs.id.clone()),
+                                    )
+                                    .when(gs.live, |s| {
+                                        s.child(
+                                            div()
+                                                .text_xs()
+                                                .font_family(t.mono_font_family.clone())
+                                                .text_color(t.success)
+                                                .child("LIVE"),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .truncate()
+                                    .child(if gs.preview.is_empty() {
+                                        format!("{} · {}", gs.model, relative(gs.timestamp))
+                                    } else {
+                                        format!(
+                                            "{} · {} · {}",
+                                            gs.preview,
+                                            gs.model,
+                                            relative(gs.timestamp)
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .truncate()
+                                    .child(gs.cwd.clone()),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("resume-{}", gs.id)))
+                            .small()
+                            .label("Resume")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.run(Cmd::ResumeSession(id.clone()), window, cx);
+                                this.panel = None;
+                            })),
+                    ),
+            );
+        }
+        v_flex()
+            .flex_1()
+            .h_full()
+            .child(rows)
+            .when(self.gray_sessions.is_empty(), |s| {
+                s.child(
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .text_sm()
+                        .text_color(t.muted_foreground)
+                        .child("No Gray sessions found")
+                        .child(
+                            div()
+                                .text_xs()
+                                .child("Run gray in a terminal, or send a turn here"),
+                        ),
+                )
+            })
+    }
+
     fn render_viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         match &self.viewer {
