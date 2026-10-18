@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
+use std::time::Instant;
 
 actions!(
     gray,
@@ -119,6 +120,7 @@ enum Cmd {
 struct ActiveTurn {
     turn: Turn,
     text: String,
+    started: Instant,
 }
 
 struct Tab {
@@ -159,6 +161,7 @@ pub struct GrayApp {
     state_file: Option<PathBuf>,
     last_snapshot: String,
     _subs: Vec<Subscription>,
+    ticks: u64,
     hub: Vec<HubEntry>,
     hub_error: Option<String>,
     installed: Vec<Installed>,
@@ -252,6 +255,7 @@ impl GrayApp {
             state_file: std::env::var_os("GRAY_IDE_STATE").map(PathBuf::from),
             last_snapshot: String::new(),
             _subs: subs,
+            ticks: 0,
             hub: Vec::new(),
             hub_error: None,
             installed: Vec::new(),
@@ -474,6 +478,7 @@ impl GrayApp {
             tid,
             ActiveTurn {
                 turn,
+                started: Instant::now(),
                 text: String::new(),
             },
         );
@@ -520,6 +525,7 @@ impl GrayApp {
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
+        self.ticks += 1;
         let mut changed = false;
         let mut finished: Vec<(String, Result<(), String>)> = Vec::new();
         let mut activities: Vec<(String, String, String, String)> = Vec::new();
@@ -1343,6 +1349,7 @@ impl GrayApp {
             "messages": messages,
             "activities": activities,
             "running": thread.map(|t| self.turns.contains_key(&t.id)).unwrap_or(false),
+            "turn_seconds": self.active_thread.as_ref().and_then(|t| self.turns.get(t)).map(|a| a.started.elapsed().as_secs_f64()),
             "branch": self.branch,
             "branches": self.branches,
             "tree": self.tree.iter().map(|e| e.rel.clone()).collect::<Vec<_>>(),
@@ -1378,6 +1385,51 @@ fn fuzzy(hay: &str, needle: &str) -> bool {
         .chars()
         .filter(|c| !c.is_whitespace())
         .all(|c| it.any(|h| h == c))
+}
+
+fn churner(ticks: u64, t: &Theme) -> impl IntoElement {
+    h_flex().gap_0p5().children((0..8).map(|i| {
+        let on = ((ticks / 2) + i) % 8 < 4;
+        div().size(px(4.)).bg(if on { t.primary } else { t.border })
+    }))
+}
+
+fn provider_brand(provider: &str) -> Option<&'static str> {
+    match provider {
+        "gray" => Some("icons/gray-logo.svg"),
+        "claude" => Some("icons/claude.svg"),
+        "codex" => Some("icons/openai.svg"),
+        _ => None,
+    }
+}
+
+fn provider_chip(
+    id: impl Into<ElementId>,
+    provider: &str,
+    label: impl Into<SharedString>,
+    cx: &App,
+) -> Stateful<Div> {
+    let t = cx.theme();
+    let mut c = h_flex()
+        .id(id)
+        .gap_1()
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .text_xs()
+        .text_color(t.muted_foreground)
+        .cursor_pointer()
+        .hover(|s| s.bg(t.secondary_hover));
+    c = match provider_brand(provider) {
+        Some(path) => c.child(
+            svg()
+                .path(path.to_string())
+                .size_3()
+                .text_color(t.muted_foreground),
+        ),
+        None => c.child(Icon::new(IconName::Bot).xsmall()),
+    };
+    c.child(label.into())
 }
 
 fn chip(
@@ -1695,8 +1747,12 @@ impl GrayApp {
                             .items_center()
                             .justify_center()
                             .text_xs()
-                            .font_bold()
-                            .child("G"),
+                            .child(
+                                svg()
+                                    .path("icons/gray-logo.svg")
+                                    .size_4()
+                                    .text_color(t.background),
+                            ),
                     )
                     .child(div().font_semibold().child("Gray"))
                     .child(
@@ -1958,6 +2014,12 @@ impl GrayApp {
                 .items_center()
                 .justify_center()
                 .gap_3()
+                .child(
+                    svg()
+                        .path("icons/gray-logo.svg")
+                        .size_16()
+                        .text_color(t.foreground),
+                )
                 .child(div().text_3xl().font_family("Brygada 1918").child("Gray"))
                 .child(div().text_color(t.muted_foreground).child(match project {
                     Some(p) => format!("What should we build in {p}?"),
@@ -1995,11 +2057,12 @@ impl GrayApp {
                             .gap_2()
                             .text_xs()
                             .text_color(t.muted_foreground)
-                            .child(Icon::new(IconName::LoaderCircle).xsmall())
-                            .child(format!(
-                                "{} is working",
-                                provider::provider_label(&thread.provider)
-                            )),
+                            .child(churner(self.ticks, &t))
+                            .child(div().font_family(t.mono_font_family.clone()).child(format!(
+                                "{} · CHURNING {:.1}S",
+                                provider::provider_label(&thread.provider),
+                                a.started.elapsed().as_secs_f32()
+                            ))),
                     )
                     .when(!a.text.is_empty(), |s| {
                         s.child(TextView::markdown("streaming", a.text.clone()).selectable(true))
@@ -2057,9 +2120,9 @@ impl GrayApp {
                             .pb_2()
                             .gap_1()
                             .child(
-                                chip(
+                                provider_chip(
                                     "composer-model",
-                                    IconName::Bot,
+                                    &provider,
                                     format!(
                                         "{} · {} · {}",
                                         provider::provider_label(&provider),
@@ -2673,7 +2736,7 @@ fn render_item(item: &Item, t: &Theme) -> AnyElement {
                 .gap_2()
                 .text_xs()
                 .text_color(color)
-                .child(Icon::new(icon).xsmall())
+                .child(icon)
                 .child(div().font_medium().child(label.clone()))
                 .child(div().truncate().text_color(t.muted_foreground).child(short))
                 .into_any_element()

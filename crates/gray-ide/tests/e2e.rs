@@ -124,7 +124,14 @@ impl Gray {
             .env("XDG_RUNTIME_DIR", &xdg)
             .env("GRAY_IDE_HOME", &self.home)
             .env("GRAY_IDE_STATE", &self.state)
-            .env("GRAY_IDE_FAKE_DELAY_MS", "5")
+            .env(
+                "GRAY_IDE_FAKE_DELAY_MS",
+                self.env
+                    .iter()
+                    .find(|(k, _)| k == "GRAY_IDE_FAKE_DELAY_MS")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| "5".into()),
+            )
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .spawn()
@@ -801,4 +808,42 @@ fn plugins_panel_browses_hub_and_manages_real_gray_plugins() {
     g.wait_for("removed", |s| {
         s["plugins"].as_array().unwrap().is_empty() && s["plugin_busy"].is_null()
     });
+}
+
+fn max_pixel(path: &Path, x: u32, y: u32, w: u32, h: u32) -> u32 {
+    let out = Command::new("convert")
+        .arg(path)
+        .args(["-crop", &format!("{w}x{h}+{x}+{y}")])
+        .args(["-format", "%[max]", "info:"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    out.parse().unwrap_or(0)
+}
+
+#[test]
+fn brand_logo_and_churning_loader_render() {
+    let Some(g) = Gray::start_with(
+        "brand",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "40".into())],
+    ) else {
+        return;
+    };
+    let shot = g.screenshot("brand-hero");
+    assert!(
+        max_pixel(&shot, 772, 268, 60, 60) > 150,
+        "hero logo invisible"
+    );
+    assert!(
+        max_pixel(&shot, 14, 14, 28, 28) > 100,
+        "sidebar logo invisible"
+    );
+    g.send("take your time");
+    let s = g.wait_for("turn started", |s| {
+        s["running"] == true && s["turn_seconds"].is_number()
+    });
+    g.screenshot("churning");
+    assert!(s["turn_seconds"].as_f64().unwrap() > 0.0);
+    g.wait_for("turn done", |s| s["running"] == false);
 }

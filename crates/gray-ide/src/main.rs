@@ -1,4 +1,5 @@
 mod app;
+mod assets;
 mod git;
 mod plugins;
 mod provider;
@@ -31,7 +32,7 @@ fn main() {
     });
     let store = store::Store::open(&data_dir()).expect("open gray data directory");
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(assets::GrayAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             app::bind_keys(cx);
