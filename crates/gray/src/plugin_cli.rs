@@ -1500,7 +1500,7 @@ struct CompletionRow {
 struct CompletionTable {
     home: PathBuf,
     user_home: Option<PathBuf>,
-    stamps: Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    stamps: Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)>,
     rows: Vec<CompletionRow>,
 }
 
@@ -1515,8 +1515,9 @@ static COMPLETIONS: Mutex<CompletionCache> = Mutex::new(CompletionCache {
     builds: 0,
 });
 
-fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+fn file_mtime(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 fn enabled_in(user: &LockFile, project: Option<&LockFile>, name: &str, entry: &LockEntry) -> bool {
@@ -1532,7 +1533,7 @@ fn scan_lock_completions(
     lock: &LockFile,
     project: Option<&LockFile>,
     global_only: bool,
-    stamps: &mut Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    stamps: &mut Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)>,
     rows: &mut Vec<CompletionRow>,
     seen: &mut std::collections::HashSet<String>,
 ) {
