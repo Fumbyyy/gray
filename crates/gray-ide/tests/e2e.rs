@@ -865,3 +865,27 @@ fn background_wallpaper_renders_and_persists() {
     g.send("/bg none");
     g.wait_for("background cleared", |s| s["background"] == "none");
 }
+
+#[test]
+fn code_viewer_previews_file_and_background_in_palette() {
+    let Some(g) = Gray::start("viewer") else {
+        return;
+    };
+    std::fs::write(
+        g.root.join("project/hello.rs"),
+        "fn main() { println!(\"hi\"); }\n",
+    )
+    .unwrap();
+    g.send("/view hello.rs");
+    g.wait_for("viewer open", |s| s["viewer"] == "hello.rs");
+    g.screenshot("viewer");
+    g.key("ctrl+k");
+    g.type_text("Background");
+    let s = g.wait_for("background items", |s| {
+        s["palette_items"]
+            .to_string()
+            .contains("Background: Andromeda")
+    });
+    assert!(s["palette_items"].to_string().contains("Background: None"));
+    g.key("Escape");
+}

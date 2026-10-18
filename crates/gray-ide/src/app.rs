@@ -41,7 +41,8 @@ actions!(
         StopTurn,
         FocusComposer,
         EffortPicker,
-        TogglePluginsPanel
+        TogglePluginsPanel,
+        ToggleViewer
     ]
 );
 
@@ -65,6 +66,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-l", FocusComposer, None),
         KeyBinding::new("ctrl-shift-e", EffortPicker, None),
         KeyBinding::new("ctrl-shift-p", TogglePluginsPanel, None),
+        KeyBinding::new("ctrl-shift-v", ToggleViewer, None),
     ]);
 }
 
@@ -73,6 +75,7 @@ enum Panel {
     Files,
     Diff,
     Plugins,
+    Viewer,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -116,6 +119,8 @@ enum Cmd {
     Worktree(String),
     Effort(String),
     SetBackground(String),
+    ToggleViewer,
+    PreviewFile(String),
 }
 
 struct ActiveTurn {
@@ -153,6 +158,7 @@ pub struct GrayApp {
     expanded: HashSet<String>,
     tree: Vec<FileEntry>,
     tabs: Vec<Tab>,
+    viewer: Option<(String, Entity<EditorState>)>,
     active_tab: Option<usize>,
     diff: Option<Entity<DiffState>>,
     diff_files: Vec<String>,
@@ -247,6 +253,7 @@ impl GrayApp {
             expanded: HashSet::new(),
             tree: Vec::new(),
             tabs: Vec::new(),
+            viewer: None,
             active_tab: None,
             diff: None,
             diff_files: Vec::new(),
@@ -517,6 +524,7 @@ impl GrayApp {
             "worktree" => Cmd::Worktree(arg),
             "effort" => Cmd::Effort(arg),
             "background" | "bg" => Cmd::SetBackground(arg),
+            "view" | "preview" => Cmd::PreviewFile(arg),
             _ => {
                 self.toast(format!("Unknown command /{name}"), true);
                 cx.notify();
@@ -746,6 +754,18 @@ impl GrayApp {
         items.push((k("Toggle theme"), k("Ctrl+Shift+L"), Cmd::ToggleTheme));
         items.push((k("Create checkpoint"), k("Git"), Cmd::Checkpoint));
         items.push((k("Plugins"), k("Ctrl+Shift+P"), Cmd::TogglePlugins));
+        items.push((k("Code viewer"), k("Ctrl+Shift+V"), Cmd::ToggleViewer));
+        for b in [
+            ("none", "None"),
+            ("andromeda", "Andromeda"),
+            ("bluemarble", "Blue Marble"),
+        ] {
+            items.push((
+                format!("Background: {}", b.1),
+                k("Theme"),
+                Cmd::SetBackground(b.0.into()),
+            ));
+        }
         for h in &self.hub {
             items.push((
                 format!("Install plugin: {}", h.name),
@@ -1174,6 +1194,20 @@ impl GrayApp {
                     self.store.append(Event::ThreadSnoozed { id, until });
                 }
             }
+            Cmd::ToggleViewer => {
+                self.panel = if self.panel == Some(Panel::Viewer) {
+                    None
+                } else {
+                    Some(Panel::Viewer)
+                };
+            }
+            Cmd::PreviewFile(rel) => {
+                if rel.is_empty() {
+                    self.toast("Usage: /view <file>", true);
+                } else {
+                    self.preview_file(&rel, window, cx);
+                }
+            }
             Cmd::SetBackground(b) => {
                 self.store.append(Event::SettingChanged {
                     key: "background".into(),
@@ -1271,6 +1305,37 @@ impl GrayApp {
         self.panel = Some(Panel::Files);
     }
 
+    fn preview_file(&mut self, rel: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.work_root() else {
+            return;
+        };
+        let path = root.join(rel);
+        if !path.is_file() {
+            self.toast(format!("No file: {rel}"), true);
+            cx.notify();
+            return;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let lang = workspace::language_for(rel);
+        match &self.viewer {
+            Some((p, st)) if p == rel => {
+                st.update(cx, |s, cx| s.set_value(content, window, cx));
+            }
+            _ => {
+                let st = cx.new(|cx| {
+                    let mut s = EditorState::new(window, cx)
+                        .language(lang)
+                        .line_number(true);
+                    s.set_value(content, window, cx);
+                    s
+                });
+                self.viewer = Some((rel.to_string(), st));
+            }
+        }
+        self.panel = Some(Panel::Viewer);
+        cx.notify();
+    }
+
     fn reload_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.work_root() else {
             return;
@@ -1359,6 +1424,7 @@ impl GrayApp {
             "panel": self.panel.map(|p| format!("{p:?}")),
             "theme": cx.theme().mode.name(),
             "background": self.store.state.setting("background", "none"),
+            "viewer": self.viewer.as_ref().map(|(p, _)| p.clone()),
             "project": self.active_project.as_ref().and_then(|p| self.store.state.project(p)).map(|p| serde_json::json!({"name": p.name, "path": p.path})),
             "projects": self.store.state.projects.len(),
             "thread": thread.map(|t| serde_json::json!({"id": t.id, "title": t.title, "provider": t.provider, "model": t.model, "mode": t.mode, "pinned": t.pinned, "settled": t.settled, "snoozed": t.snoozed_until > now(), "worktree": t.worktree, "effort": t.effort, "session": t.session.as_ref().map(|s| s.1.clone())})),
@@ -2291,6 +2357,17 @@ impl GrayApp {
                     })),
             )
             .child(
+                Button::new("panel-viewer")
+                    .ghost()
+                    .small()
+                    .label("Viewer")
+                    .selected(panel == Panel::Viewer)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.panel = Some(Panel::Viewer);
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("panel-plugins")
                     .ghost()
                     .small()
@@ -2336,6 +2413,7 @@ impl GrayApp {
                     })),
             );
         let body: AnyElement = match panel {
+            Panel::Viewer => self.render_viewer(cx).into_any_element(),
             Panel::Plugins => self.render_plugins(cx).into_any_element(),
             Panel::Diff => match &self.diff {
                 Some(state) => Diff::new(state).flex_1().min_h_0().into_any_element(),
@@ -2385,7 +2463,7 @@ impl GrayApp {
                                     }
                                     this.refresh_workspace(cx);
                                 } else {
-                                    this.open_file(&rel, window, cx);
+                                    this.preview_file(&rel, window, cx);
                                 }
                                 cx.notify();
                             }))
@@ -2709,6 +2787,95 @@ impl GrayApp {
     }
 }
 
+impl GrayApp {
+    fn render_viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        match &self.viewer {
+            Some((rel, st)) => {
+                let lang = workspace::language_for(rel);
+                let mut crumbs = h_flex().gap_1().items_center().text_xs();
+                crumbs = crumbs.child(Icon::new(IconName::File).xsmall());
+                let parts: Vec<&str> = rel.split('/').collect();
+                for (i, part) in parts.iter().enumerate() {
+                    if i > 0 {
+                        crumbs = crumbs.child(
+                            Icon::new(IconName::ChevronRight)
+                                .xsmall()
+                                .text_color(t.muted_foreground),
+                        );
+                    }
+                    let part = part.to_string();
+                    crumbs = crumbs.child(
+                        div()
+                            .when(i < parts.len() - 1, |s| s.text_color(t.muted_foreground))
+                            .child(part),
+                    );
+                }
+                let body = v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(Editor::new(st).h_full().bordered(false).readonly(true));
+                v_flex()
+                    .flex_1()
+                    .h_full()
+                    .child(
+                        h_flex()
+                            .h(px(32.))
+                            .flex_none()
+                            .px_3()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(t.border)
+                            .child(crumbs)
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .child(format!("{lang} · read-only")),
+                            )
+                            .child(
+                                Button::new("viewer-copy")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Copy)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some((_, st)) = &this.viewer {
+                                            let v = st.read(cx).value().to_string();
+                                            cx.write_to_clipboard(ClipboardItem::new_string(v));
+                                            this.toast("Copied", false);
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("viewer-open-editor")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::ExternalLink)
+                                    .on_click(cx.listener({
+                                        let rel = rel.clone();
+                                        move |this, _, window, cx| {
+                                            this.open_file(&rel, window, cx);
+                                        }
+                                    })),
+                            ),
+                    )
+                    .child(body)
+                    .into_any_element()
+            }
+            None => v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(t.muted_foreground)
+                .child("Click a file in the tree to preview it")
+                .into_any_element(),
+        }
+    }
+}
+
 fn render_item(item: &Item, t: &Theme) -> AnyElement {
     match item {
         Item::Message {
@@ -2900,6 +3067,9 @@ impl Render for GrayApp {
             .on_action(cx.listener(|this, _: &TogglePluginsPanel, w, cx| {
                 this.run(Cmd::TogglePlugins, w, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &ToggleViewer, w, cx| this.run(Cmd::ToggleViewer, w, cx)),
+            )
             .on_action(cx.listener(|this, _: &EffortPicker, w, cx| {
                 this.open_palette(PaletteMode::Commands, "Effort:", w, cx)
             }))
