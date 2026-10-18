@@ -69,6 +69,11 @@ pub enum Event {
         detail: String,
         at: i64,
     },
+    ThreadSession {
+        id: String,
+        provider: String,
+        session: String,
+    },
     TurnFinished {
         thread_id: String,
         status: String,
@@ -112,6 +117,7 @@ pub struct Thread {
     pub pinned: bool,
     pub archived: bool,
     pub items: Vec<Item>,
+    pub session: Option<(String, String)>,
     pub updated_at: i64,
     pub last_status: String,
 }
@@ -157,6 +163,7 @@ impl State {
                 pinned: false,
                 archived: false,
                 items: Vec::new(),
+                session: None,
                 updated_at: *at,
                 last_status: String::new(),
             }),
@@ -183,6 +190,9 @@ impl State {
                 mode,
             } => {
                 if let Some(t) = self.thread_mut(id) {
+                    if &t.provider != provider {
+                        t.session = None;
+                    }
                     t.provider = provider.clone();
                     t.model = model.clone();
                     t.mode = mode.clone();
@@ -219,6 +229,15 @@ impl State {
                         detail: detail.clone(),
                     });
                     t.updated_at = *at;
+                }
+            }
+            Event::ThreadSession {
+                id,
+                provider,
+                session,
+            } => {
+                if let Some(t) = self.thread_mut(id) {
+                    t.session = Some((provider.clone(), session.clone()));
                 }
             }
             Event::TurnFinished {

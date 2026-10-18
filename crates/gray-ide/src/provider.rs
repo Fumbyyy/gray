@@ -15,6 +15,7 @@ pub enum ProviderEvent {
         label: String,
         detail: String,
     },
+    Session(String),
     Done,
     Error(String),
 }
@@ -99,6 +100,7 @@ pub struct TurnRequest {
     pub mode: String,
     pub prompt: String,
     pub cwd: PathBuf,
+    pub session: Option<String>,
 }
 
 pub fn start(req: TurnRequest) -> Turn {
@@ -131,6 +133,12 @@ fn bin(env: &str, default: &str) -> String {
 fn gray_command(req: &TurnRequest) -> Command {
     let mut cmd = Command::new(bin("GRAY_IDE_GRAY_BIN", "gray"));
     cmd.arg("-p").arg(&req.prompt).arg("--json");
+    if !req.model.is_empty() && req.model != "default" {
+        cmd.arg("--model").arg(&req.model);
+    }
+    if let Some(sid) = &req.session {
+        cmd.arg("--session").arg(sid);
+    }
     cmd.current_dir(&req.cwd);
     cmd
 }
@@ -147,6 +155,9 @@ fn claude_command(req: &TurnRequest) -> Command {
         .args(["--output-format", "stream-json", "--verbose"])
         .args(["--model", &req.model])
         .args(["--permission-mode", mode]);
+    if let Some(sid) = &req.session {
+        cmd.arg("--resume").arg(sid);
+    }
     cmd.current_dir(&req.cwd);
     cmd
 }
@@ -160,8 +171,11 @@ fn codex_command(req: &TurnRequest) -> Command {
     let mut cmd = Command::new(bin("GRAY_IDE_CODEX_BIN", "codex"));
     cmd.args(["exec", "--json", "--skip-git-repo-check"])
         .args(["--model", &req.model])
-        .args(["--sandbox", sandbox])
-        .arg(&req.prompt);
+        .args(["--sandbox", sandbox]);
+    if let Some(sid) = &req.session {
+        cmd.arg("resume").arg(sid);
+    }
+    cmd.arg(&req.prompt);
     cmd.current_dir(&req.cwd);
     cmd
 }
@@ -248,6 +262,17 @@ fn run_process(
 pub struct ParseState {
     pub got_text: bool,
     pub error: Option<String>,
+    pub session: Option<String>,
+}
+
+impl ParseState {
+    fn session(&mut self, id: String) -> Option<ProviderEvent> {
+        if id.is_empty() || self.session.as_deref() == Some(id.as_str()) {
+            return None;
+        }
+        self.session = Some(id.clone());
+        Some(ProviderEvent::Session(id))
+    }
 }
 
 fn s(v: &serde_json::Value, key: &str) -> String {
@@ -258,6 +283,12 @@ fn s(v: &serde_json::Value, key: &str) -> String {
 }
 
 pub fn parse_gray(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEvent> {
+    let mut out: Vec<ProviderEvent> = st.session(s(v, "session_id")).into_iter().collect();
+    out.extend(parse_gray_row(v, st));
+    out
+}
+
+fn parse_gray_row(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEvent> {
     match v.get("type").and_then(|t| t.as_str()) {
         Some("progress") => match v.get("phase").and_then(|p| p.as_str()) {
             Some("text") => {
@@ -319,7 +350,7 @@ pub fn parse_gray(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEve
 }
 
 pub fn parse_claude(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEvent> {
-    let mut out = Vec::new();
+    let mut out: Vec<ProviderEvent> = st.session(s(v, "session_id")).into_iter().collect();
     match v.get("type").and_then(|t| t.as_str()) {
         Some("assistant") => {
             if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) {
@@ -362,6 +393,7 @@ pub fn parse_claude(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderE
 pub fn parse_codex(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEvent> {
     let mut out = Vec::new();
     match v.get("type").and_then(|t| t.as_str()) {
+        Some("thread.started") => out.extend(st.session(s(v, "thread_id"))),
         Some("item.completed") => {
             let item = v.get("item").cloned().unwrap_or_default();
             match item.get("type").and_then(|t| t.as_str()) {
@@ -411,6 +443,11 @@ fn run_fake(req: &TurnRequest, tx: &Sender<ProviderEvent>) -> Result<(), String>
             .unwrap_or(25),
     );
     let prompt = req.prompt.trim();
+    let session = req
+        .session
+        .clone()
+        .unwrap_or_else(|| format!("fake-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+    let _ = tx.send(ProviderEvent::Session(session.clone()));
     if prompt.contains("please fail") {
         thread::sleep(delay);
         return Err("fake provider failure requested".into());
@@ -446,7 +483,7 @@ fn run_fake(req: &TurnRequest, tx: &Sender<ProviderEvent>) -> Result<(), String>
         thread::sleep(Duration::from_secs(5));
     }
     let reply = format!(
-        "Gray fake agent received: **{prompt}**\n\nRunning in `{}` with model `{}` and mode `{}`.\n\n```rust\nfn main() {{\n    println!(\"hello from gray\");\n}}\n```\n",
+        "Gray fake agent received: **{prompt}**\n\nRunning in `{}` with model `{}` and mode `{}` in session `{session}`.\n\n```rust\nfn main() {{\n    println!(\"hello from gray\");\n}}\n```\n",
         req.cwd
             .file_name()
             .map(|n| n.to_string_lossy().to_string())

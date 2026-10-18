@@ -421,6 +421,11 @@ impl GrayApp {
             mode: thread.mode.clone(),
             prompt: text,
             cwd: root,
+            session: thread
+                .session
+                .as_ref()
+                .filter(|(p, _)| p == &thread.provider)
+                .map(|(_, sid)| sid.clone()),
         });
         self.turns.insert(
             tid,
@@ -466,6 +471,7 @@ impl GrayApp {
         let mut changed = false;
         let mut finished: Vec<(String, Result<(), String>)> = Vec::new();
         let mut activities: Vec<(String, String, String, String)> = Vec::new();
+        let mut sessions: Vec<(String, String)> = Vec::new();
         for (tid, active) in self.turns.iter_mut() {
             loop {
                 match active.turn.rx.try_recv() {
@@ -485,6 +491,7 @@ impl GrayApp {
                         activities.push((tid.clone(), kind, label, detail));
                         changed = true;
                     }
+                    Ok(ProviderEvent::Session(sid)) => sessions.push((tid.clone(), sid)),
                     Ok(ProviderEvent::Done) => {
                         finished.push((tid.clone(), Ok(())));
                         break;
@@ -499,6 +506,23 @@ impl GrayApp {
                         break;
                     }
                 }
+            }
+        }
+        for (tid, sid) in sessions {
+            let provider = self.store.state.thread(&tid).map(|t| t.provider.clone());
+            let known = self
+                .store
+                .state
+                .thread(&tid)
+                .and_then(|t| t.session.as_ref())
+                .map(|(p, s)| Some(p) == provider.as_ref() && s == &sid)
+                .unwrap_or(false);
+            if let (Some(provider), false) = (provider, known) {
+                self.store.append(Event::ThreadSession {
+                    id: tid,
+                    provider,
+                    session: sid,
+                });
             }
         }
         for (tid, kind, label, detail) in activities {
@@ -1109,7 +1133,7 @@ impl GrayApp {
             "theme": cx.theme().mode.name(),
             "project": self.active_project.as_ref().and_then(|p| self.store.state.project(p)).map(|p| serde_json::json!({"name": p.name, "path": p.path})),
             "projects": self.store.state.projects.len(),
-            "thread": thread.map(|t| serde_json::json!({"id": t.id, "title": t.title, "provider": t.provider, "model": t.model, "mode": t.mode, "pinned": t.pinned})),
+            "thread": thread.map(|t| serde_json::json!({"id": t.id, "title": t.title, "provider": t.provider, "model": t.model, "mode": t.mode, "pinned": t.pinned, "session": t.session.as_ref().map(|s| s.1.clone())})),
             "threads": threads,
             "messages": messages,
             "activities": activities,

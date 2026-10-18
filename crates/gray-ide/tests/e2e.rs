@@ -1,8 +1,11 @@
 use serde_json::Value;
 use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -40,10 +43,15 @@ struct Gray {
     display: String,
     xvfb: Child,
     app: Option<Child>,
+    env: Vec<(String, String)>,
 }
 
 impl Gray {
     fn start(name: &str) -> Option<Self> {
+        Self::start_with(name, "fake", Vec::new())
+    }
+
+    fn start_with(name: &str, provider: &str, env: Vec<(String, String)>) -> Option<Self> {
         if !have("Xvfb") || !have("xdotool") {
             eprintln!("skipping {name}: Xvfb and xdotool are required for e2e tests");
             return None;
@@ -68,7 +76,7 @@ impl Gray {
         );
         fs::write(
             home.join("events.jsonl"),
-            "{\"type\":\"setting_changed\",\"key\":\"default_provider\",\"value\":\"fake\"}\n",
+            format!("{{\"type\":\"setting_changed\",\"key\":\"default_provider\",\"value\":\"{provider}\"}}\n"),
         )
         .unwrap();
         let mut n = 300 + (std::process::id() % 100) * 16 + NEXT.fetch_add(1, Ordering::SeqCst);
@@ -97,6 +105,7 @@ impl Gray {
             display: format!(":{n}"),
             xvfb,
             app: None,
+            env,
         };
         g.launch();
         Some(g)
@@ -109,6 +118,7 @@ impl Gray {
         let log = fs::File::create(self.root.join("app.log")).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_gray-ide"))
             .arg(&self.project)
+            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .env("DISPLAY", &self.display)
             .env("VK_ICD_FILENAMES", "/nonexistent.json")
             .env("XDG_RUNTIME_DIR", &xdg)
@@ -529,4 +539,140 @@ fn failed_turn_surfaces_error_and_theme_persists() {
     g.screenshot("light");
     g.restart();
     g.wait_for("light after restart", |s| s["theme"] == "light");
+}
+
+struct MockLlm {
+    url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+fn mock_llm() -> MockLlm {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let log = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().map_while(Result::ok) {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0usize;
+            let mut first = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                if first.is_empty() {
+                    first = line.clone();
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0u8; len];
+            let _ = reader.read_exact(&mut body);
+            let mut stream = stream;
+            if !first.starts_with("POST") || !first.contains("/chat/completions") {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+                continue;
+            }
+            let n = {
+                let mut l = log.lock().unwrap();
+                l.push(String::from_utf8_lossy(&body).to_string());
+                l.len()
+            };
+            let mut resp = String::from(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+            );
+            for w in ["Hello ", "from ", "mock ", &format!("turn {n}")] {
+                let chunk = serde_json::json!({"id": "c1", "object": "chat.completion.chunk", "model": "mock",
+                    "choices": [{"index": 0, "delta": {"content": w}, "finish_reason": null}]});
+                resp.push_str(&format!("data: {chunk}\n\n"));
+            }
+            let done = serde_json::json!({"id": "c1", "object": "chat.completion.chunk", "model": "mock",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9}});
+            resp.push_str(&format!("data: {done}\n\ndata: [DONE]\n\n"));
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    MockLlm { url, requests }
+}
+
+fn gray_bin() -> Option<PathBuf> {
+    let path = std::env::var_os("GRAY_IDE_E2E_GRAY_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/gray"));
+    path.exists().then_some(path)
+}
+
+#[test]
+fn fake_provider_session_carries_across_turns() {
+    let Some(g) = Gray::start("fake_session") else {
+        return;
+    };
+    g.send("one");
+    let s = g.wait_for("first", finished);
+    let sid = s["thread"]["session"]
+        .as_str()
+        .expect("session recorded")
+        .to_string();
+    assert!(sid.starts_with("fake-"));
+    g.send("two");
+    let s = g.wait_for("second", |s| finished(s) && messages(s).len() == 4);
+    assert!(messages(&s)[3].1.contains(&format!("session `{sid}`")));
+    assert_eq!(s["thread"]["session"], sid.as_str());
+}
+
+#[test]
+fn real_gray_cli_provider_streams_and_resumes_session() {
+    let Some(bin) = gray_bin() else {
+        eprintln!("skipping: build the gray CLI first (cargo build -p gray at the repo root)");
+        return;
+    };
+    let llm = mock_llm();
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("gray-e2e")
+        .join("gray-home");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let env = vec![
+        ("GRAY_IDE_GRAY_BIN".to_string(), bin.display().to_string()),
+        ("GRAY_HOME".to_string(), root.display().to_string()),
+        ("GRAY_BASE_URL".to_string(), llm.url.clone()),
+        ("GRAY_API_KEY".to_string(), "e2e-key".to_string()),
+        ("GRAY_MODEL".to_string(), "mock".to_string()),
+    ];
+    let Some(g) = Gray::start_with("gray_cli", "gray", env) else {
+        return;
+    };
+    g.send("first question for gray");
+    let s = g.wait_for("gray reply", finished);
+    assert_eq!(s["thread"]["provider"], "gray");
+    assert_eq!(messages(&s)[1].1, "Hello from mock turn 1");
+    let sid = s["thread"]["session"]
+        .as_str()
+        .expect("gray session id")
+        .to_string();
+    assert!(!sid.is_empty());
+    g.screenshot("gray-reply");
+    g.send("second question");
+    let s = g.wait_for("second gray reply", |s| {
+        finished(s) && messages(s).len() == 4
+    });
+    assert_eq!(messages(&s)[3].1, "Hello from mock turn 2");
+    assert_eq!(s["thread"]["session"], sid.as_str());
+    let reqs = llm.requests.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 2);
+    assert!(reqs[0].contains("first question for gray"));
+    assert!(
+        reqs[1].contains("first question for gray")
+            && reqs[1].contains("Hello from mock turn 1")
+            && reqs[1].contains("second question")
+    );
 }

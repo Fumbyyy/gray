@@ -45,6 +45,9 @@ jobs:
             libx11-xcb-dev libxcb1-dev libxcb-xkb-dev libfontconfig1-dev libfreetype-dev \
             libvulkan-dev mesa-vulkan-drivers libgl1-mesa-dri libegl1 libssl-dev libzstd-dev \
             libasound2-dev clang xvfb xdotool imagemagick fonts-dejavu-core git
+      - name: Build the gray CLI used by the provider e2e test
+        working-directory: .
+        run: cargo build --locked -p gray
       - run: cargo fmt --check
       - run: cargo clippy --locked -- -D warnings
       - name: End-to-end tests against the real binary under Xvfb
