@@ -165,7 +165,7 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
     let footer_model_color = faint_dimmed;
 
     let arrow_span = Span::styled(
-        " ❯ ",
+        format!(" {} ", crate::tui::arrow_glyph()),
         Style::default()
             .fg(prompt_arrow_color)
             .add_modifier(Modifier::DIM)

@@ -17,6 +17,7 @@ pub(crate) mod failed_turn;
 pub mod feedback;
 pub(crate) mod gateway_pid;
 pub mod host;
+pub mod ide;
 pub mod keymap;
 pub mod logging;
 pub(crate) mod mascot;
@@ -765,6 +766,14 @@ pub enum Commands {
         index_dir: Option<std::path::PathBuf>,
     },
 
+    #[command(
+        about = "Install a catalog plugin or register a native executable (gray install plugin NAME)"
+    )]
+    Install {
+        #[command(subcommand)]
+        cmd: InstallCmd,
+    },
+
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -927,6 +936,15 @@ pub enum PluginCmd {
 
         #[arg(long, help = "Grant every declared capability (needs NAME)")]
         all: bool,
+    },
+}
+
+#[derive(Parser, Debug, Clone)]
+pub enum InstallCmd {
+    #[command(about = "Register a plugin command from the catalog, PATH, or GRAY_PLUGIN_PATH")]
+    Plugin {
+        #[arg(value_name = "NAME")]
+        name: String,
     },
 }
 

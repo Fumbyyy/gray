@@ -62,6 +62,13 @@ class InstallerSecurityGuards(unittest.TestCase):
         self.assertIn('WaitForExit(10000)', NATIVE)
         self.assertIn('Version probe timed out', NATIVE)
 
+    def test_windows_10_is_the_native_floor(self):
+
+        self.assertIn('-lt 10240', NATIVE)
+        self.assertIn('Windows 10 or newer', NATIVE)
+        self.assertNotIn('-lt 22000', NATIVE)
+        self.assertNotIn('Windows 11 or newer', NATIVE)
+
     def test_replacement_is_serialized_and_rolled_back(self):
 
         self.assertIn("'OpenOrCreate', 'ReadWrite', 'None'", NATIVE)
@@ -106,7 +113,7 @@ class DocumentationClaimsMatchTheCode(unittest.TestCase):
     def test_readme_no_longer_calls_windows_unsupported(self):
         self.assertNotIn('via WSL only', README)
         self.assertNotIn('native Windows unsupported', README)
-        self.assertIn('Native Windows 11 x64', README)
+        self.assertIn('Native Windows 10/11 x64', README)
 
     def test_readme_documents_the_one_liner(self):
         self.assertIn('irm https://gray.alignment.id/install.ps1 | iex', README)

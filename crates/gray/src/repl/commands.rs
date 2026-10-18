@@ -647,7 +647,7 @@ pub enum ReplCommand {
 }
 
 impl ReplCommand {
-    pub(crate) fn runs_local(&self) -> bool {
+    pub fn runs_local(&self) -> bool {
         match self {
             ReplCommand::Prompt(_)
             | ReplCommand::Empty

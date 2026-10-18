@@ -56,6 +56,63 @@ class PluginCliTests(unittest.TestCase):
         self.assertEqual(stdin, 'stdin fixture\n')
         self.assertEqual(binary, self.binary)
 
+    def test_setup_registers_sidecar_and_forwarding_survives(self):
+        # Emulates the catalog plugin's own register(): `gray discord setup`
+        # writes a sidecar argv into plugins/lock.json and refuses to
+        # overwrite a foreign argv. Install must leave no 'discord' lock
+        # entry behind, and `gray discord` must keep forwarding after the
+        # lock entry appears (register() drops cli_argv).
+        script = self.home / 'fixture.py'
+        script.write_text('import sys,json,os\n'
+                          'from pathlib import Path\n'
+                          'if sys.argv[1:] == ["setup"]:\n'
+                          '    lock = Path(os.environ["GRAY_HOME"]) / "plugins/lock.json"\n'
+                          '    data = json.loads(lock.read_text()) if lock.exists() else {"schema":1,"plugins":{}}\n'
+                          '    argv = [sys.executable, str(Path(__file__).resolve()), "sidecar"]\n'
+                          '    prev = data["plugins"].get("discord")\n'
+                          '    if prev and prev.get("argv") != argv:\n'
+                          '        print("refusing to overwrite a foreign argv", file=sys.stderr); sys.exit(1)\n'
+                          '    data["plugins"]["discord"] = {"ecosystem":"gray-native","version":"0","hash":"",'
+                          '"source":"fixture","argv":argv,"adapter_version":"1","installed_at":"","scope":"user","enabled":True}\n'
+                          '    lock.write_text(json.dumps(data))\n'
+                          '    sys.exit(0)\n'
+                          'print(json.dumps(sys.argv[1:]))\n')
+        path = self.home / 'plugins/commands.json'
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(dict(schema=1, plugins=dict(discord=dict(
+            ecosystem='gray-cli', version='test', hash='', source='fixture',
+            argv=[sys.executable, str(script)], adapter_version='1',
+            installed_at='', scope='user', enabled=True)))))
+
+        setup = self.run_gray('discord', 'setup')
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        status = self.run_gray('discord', 'status')
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout), ['status'])
+
+    def test_disable_enable_list_and_remove_commands_registry_plugin(self):
+        self.registry()
+        listing = self.run_gray('plugin', 'list')
+        self.assertIn('discord', listing.stdout)
+
+        self.assertEqual(self.run_gray('plugin', 'disable', 'discord').returncode, 0)
+        lock = self.home / 'plugins/lock.json'
+        if lock.exists():
+            self.assertNotIn('discord', json.loads(lock.read_text())['plugins'])
+        result = self.run_gray('discord', 'status')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('disabled', result.stderr)
+
+        self.assertEqual(self.run_gray('plugin', 'enable', 'discord').returncode, 0)
+        result = self.run_gray('discord', 'status')
+        self.assertEqual(result.returncode, 23, result.stderr)
+
+        self.assertEqual(self.run_gray('plugin', 'remove', 'discord').returncode, 0)
+        commands = json.loads((self.home / 'plugins/commands.json').read_text())
+        self.assertNotIn('discord', commands['plugins'])
+        result = self.run_gray('plugin', 'remove', 'discord')
+        self.assertNotEqual(result.returncode, 0)
+
     def test_disabled_corrupt_and_invalid_names_fail_closed(self):
         self.registry(enabled=False)
         result = self.run_gray('discord', 'setup')
@@ -73,9 +130,13 @@ class PluginCliTests(unittest.TestCase):
         self.assertEqual(list((self.home / 'plugins/cli').glob('*')), [])
 
     def test_installer_nonzero_exit_rolls_back_private_venv(self):
-        python = self.home / 'failing-python'
-        python.write_text('#!/bin/sh\nexit 7\n')
-        python.chmod(0o700)
+        if os.name == 'nt':
+            python = self.home / 'failing-python.bat'
+            python.write_text('@exit /b 7\r\n')
+        else:
+            python = self.home / 'failing-python'
+            python.write_text('#!/bin/sh\nexit 7\n')
+            python.chmod(0o700)
         self.env['GRAY_PLUGIN_PYTHON'] = str(python)
         result = self.run_gray('install', 'plugin', 'discord')
         self.assertNotEqual(result.returncode, 0)

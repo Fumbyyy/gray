@@ -61,7 +61,7 @@ function Install-NativeGray {
     $arch = $env:PROCESSOR_ARCHITEW6432
     if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
     if ($arch -ne 'AMD64') { throw "Unsupported native architecture: $arch (x64 required)" }
-    if ([Environment]::OSVersion.Version.Build -lt 22000) { throw 'Native install requires Windows 11 or newer' }
+    if ([Environment]::OSVersion.Version.Build -lt 10240) { throw 'Native install requires Windows 10 or newer' }
     if (-not $InstallDir) {
         if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is missing; specify -InstallDir' }
         $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\gray\bin'

@@ -379,7 +379,7 @@ pub(crate) fn format_user_prompt_lines(
 
     let hang = " ".repeat(GUTTER + 2);
     let arrow_span = Span::styled(
-        format!("{}❯ ", " ".repeat(GUTTER)),
+        format!("{}{} ", " ".repeat(GUTTER), crate::tui::arrow_glyph()),
         Style::default()
             .fg(prompt_color)
             .add_modifier(Modifier::BOLD),

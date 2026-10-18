@@ -109,7 +109,11 @@ pub(crate) fn turn_footer(
     duration_ms: Option<u64>,
     streamed_ms: Option<u64>,
 ) -> String {
-    let base = format!("\u{2b22} {} tokens", crate::repl::fmt_usage(usage.total()));
+    let base = format!(
+        "{} {} tokens",
+        crate::tui::glyph("\u{2b22}", "#"),
+        crate::repl::fmt_usage(usage.total())
+    );
     let rate = streamed_ms
         .and_then(|ms| turn_tokens_per_second(usage.output_tokens, ms))
         .map(|t| format!(" · {t} tps"))
@@ -291,23 +295,29 @@ fn handle_usage_inner(
                 rate,
                 warmth: Warmth::Unknown,
             };
-            println!("✓ Session usage — {}", usage_panel::usage_header(&input));
+            say(
+                None,
+                &format!("✓ Session usage — {}", usage_panel::usage_header(&input)),
+            );
             for line in usage_panel::usage_plain(&input) {
-                println!("{line}");
+                say(None, &line);
             }
         }
         for (title, limits) in subs {
-            println!(
-                "✓ {}{}",
-                title,
-                limits
-                    .plan
-                    .as_deref()
-                    .map(|p| format!(" — {p}"))
-                    .unwrap_or_default()
+            say(
+                None,
+                &format!(
+                    "✓ {}{}",
+                    title,
+                    limits
+                        .plan
+                        .as_deref()
+                        .map(|p| format!(" — {p}"))
+                        .unwrap_or_default()
+                ),
             );
             for line in usage_panel::subscription_plain(&limits) {
-                println!("{line}");
+                say(None, &line);
             }
         }
     }
@@ -413,9 +423,9 @@ pub(crate) async fn handle_context_window(
             t.ensure_gap();
             let _ = t.draw();
         } else if ok {
-            println!("✓ Context updated: {msg}");
+            say(None, &format!("✓ Context updated: {msg}"));
         } else {
-            println!("{msg}");
+            say(None, &msg);
         }
     }
     fn collect_parts(
@@ -712,7 +722,7 @@ pub(super) fn push_compaction_card(
                 Some(&format!("{elapsed} \u{b7} {detail}")),
             );
         }
-        None => println!("Context compacted · {elapsed} · {detail}\n"),
+        None => say(None, &format!("Context compacted · {elapsed} · {detail}\n")),
     }
 }
 
@@ -753,7 +763,7 @@ pub(crate) async fn handle_compact(
                 false,
             );
         } else {
-            println!("nothing to compact (conversation is empty)");
+            say(None, "nothing to compact (conversation is empty)");
         }
         return;
     }
@@ -841,8 +851,13 @@ pub(crate) async fn handle_compact(
                 tui.push_compaction_summary(&summary);
                 tui.ensure_gap();
             } else {
-                println!("Context compacted · {elapsed_str} ({msg_count} messages -> summary)\n");
-                println!("{summary}\n");
+                say(
+                    None,
+                    &format!(
+                        "Context compacted · {elapsed_str} ({msg_count} messages -> summary)\n"
+                    ),
+                );
+                say(None, &format!("{summary}\n"));
             }
         }
         Ok(None) => {
@@ -854,7 +869,10 @@ pub(crate) async fn handle_compact(
                     false,
                 );
             } else {
-                println!("nothing to compact (conversation already fits in context)");
+                say(
+                    None,
+                    "nothing to compact (conversation already fits in context)",
+                );
             }
         }
         Err(e) => {
@@ -866,7 +884,7 @@ pub(crate) async fn handle_compact(
                     true,
                 );
             } else {
-                println!("compaction failed: {e}");
+                say(None, &format!("compaction failed: {e}"));
             }
         }
     }
