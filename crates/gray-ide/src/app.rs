@@ -176,6 +176,7 @@ pub struct GrayApp {
     _subs: Vec<Subscription>,
     ticks: u64,
     window_handle: Option<gpui::AnyWindowHandle>,
+    pending_cmds: Vec<String>,
     hub: Vec<HubEntry>,
     hub_error: Option<String>,
     installed: Vec<Installed>,
@@ -263,6 +264,7 @@ impl GrayApp {
             viewer: None,
             gray_sessions: Vec::new(),
             window_handle: None,
+            pending_cmds: Vec::new(),
             active_tab: None,
             diff: None,
             diff_files: Vec::new(),
@@ -563,24 +565,12 @@ impl GrayApp {
             && !text.trim().is_empty()
         {
             let _ = std::fs::write(&path, "");
-            let lines: Vec<String> = text
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
-            if let Some(w) = self.window_handle {
-                let _ = w.update(cx, |view, window, cx| {
-                    if let Ok(root) = view.downcast::<GrayApp>() {
-                        root.update(cx, |app, cx| {
-                            for line in &lines {
-                                app.composer
-                                    .update(cx, |s, cx| s.set_value(line.clone(), window, cx));
-                                app.send(window, cx);
-                            }
-                        });
-                    }
-                });
-            }
+            self.pending_cmds.extend(
+                text.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty()),
+            );
+            cx.notify();
         }
         let mut changed = false;
         let mut finished: Vec<(String, Result<(), String>)> = Vec::new();
@@ -3287,6 +3277,14 @@ fn relative(ms: i64) -> String {
 
 impl Render for GrayApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.pending_cmds.is_empty() {
+            let lines = std::mem::take(&mut self.pending_cmds);
+            for line in lines {
+                self.composer
+                    .update(cx, |s, cx| s.set_value(line, window, cx));
+                self.send(window, cx);
+            }
+        }
         self.write_snapshot(cx);
         let t = cx.theme().clone();
         let _ = window;
