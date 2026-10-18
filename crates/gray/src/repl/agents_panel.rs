@@ -87,18 +87,6 @@ fn spawn_text(argv: &[String], args: &[&str]) -> Option<String> {
     )
 }
 
-pub(crate) fn run_subagents_view(args: &[String]) -> Option<String> {
-    if args == ["settings"] {
-        return Some(
-            "subagents settings: the modal opens when the turn finishes — rerun `/subagents settings`, or set directly with `settings --model/--effort/--context/--max-running`"
-                .into(),
-        );
-    }
-    let argv = plugin_argv("subagents")?;
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    spawn_text(&argv, &refs)
-}
-
 fn fetch_rows(argv: &[String], all: bool) -> Vec<Row> {
     let mut args = vec!["entries"];
     if all {

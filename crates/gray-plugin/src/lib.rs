@@ -61,6 +61,12 @@ pub struct Manifest {
     #[serde(default)]
     pub hooks: Vec<String>,
 
+    /// First-argv verbs each declared command may run mid-turn; `""` is
+    /// the bare command and `"*"` allows any argv. Keys that are not
+    /// among `commands` are dropped at parse time.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub turn_local: HashMap<String, Vec<String>>,
+
     #[serde(default)]
     pub protocol: Option<String>,
 
@@ -210,6 +216,27 @@ impl Manifest {
                 });
             }
         }
+        let commands: Vec<String> = str_list("commands");
+        let turn_local = v
+            .get("turn_local")
+            .and_then(|t| t.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter(|(k, _)| commands.iter().any(|c| c == *k))
+                    .map(|(k, val)| {
+                        let verbs = val
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|e| e.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (k.clone(), verbs)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             name: v
                 .get("name")
@@ -222,7 +249,8 @@ impl Manifest {
                 .unwrap_or_default()
                 .into(),
             tools: manifest_tools(v),
-            commands: str_list("commands"),
+            commands,
+            turn_local,
             hooks: str_list("hooks"),
             protocol: v.get("protocol").and_then(|s| s.as_str()).map(|s| s.into()),
             subcommands: str_list("subcommands"),
@@ -341,10 +369,11 @@ impl PluginHooks for PluginHookAdapter {
     fn commands(&self) -> Vec<PluginCommand> {
         let m = self.plugin.manifest();
         m.commands
-            .into_iter()
-            .chain(m.subcommands)
+            .iter()
+            .chain(m.subcommands.iter())
             .map(|name| PluginCommand {
-                name,
+                turn_local_verbs: m.turn_local.get(name).cloned().unwrap_or_default(),
+                name: name.clone(),
                 description: String::new(),
             })
             .collect()

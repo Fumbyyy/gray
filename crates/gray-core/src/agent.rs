@@ -361,6 +361,10 @@ impl InputSubmit {
 pub struct PluginCommand {
     pub name: String,
     pub description: String,
+    /// First-argv verbs the plugin allows to run while a turn is in
+    /// flight (manifest `turn_local`); `""` covers the bare command and
+    /// `"*"` allows any argv.
+    pub turn_local_verbs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

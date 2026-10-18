@@ -87,7 +87,7 @@ pub(crate) fn steer_source() -> Option<String> {
 /// deciding whether mid-turn input goes to the steer channel or the command
 /// queue.
 pub fn is_turn_local_command(line: &str) -> bool {
-    crate::repl::key_watcher::is_turn_local_command(line)
+    crate::repl::key_watcher::is_turn_local_command(line, &[])
 }
 
 /// Consume a pending host wake request (background-job notification, plugin
