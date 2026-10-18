@@ -636,7 +636,10 @@ impl Agent {
                                     turn_retry_detail(&e, turn_retries)
                                 ));
                                 if !delay.is_zero() {
-                                    tokio::time::sleep(delay).await;
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(delay) => {}
+                                        _ = ctx.cancel.cancelled() => {}
+                                    }
                                 }
                                 if ctx.cancel.is_cancelled() {
                                     self.emit_turn_end(&billed).await;
@@ -800,7 +803,10 @@ impl Agent {
                                     turn_retry_detail(&e, turn_retries)
                                 ));
                                 if !delay.is_zero() {
-                                    tokio::time::sleep(delay).await;
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(delay) => {}
+                                        _ = ctx.cancel.cancelled() => {}
+                                    }
                                 }
                                 if ctx.cancel.is_cancelled() {
                                     self.emit_turn_end(&billed).await;
