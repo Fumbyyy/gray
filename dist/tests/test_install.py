@@ -5,11 +5,13 @@ from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+import sys
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'install.sh'
 
 @unittest.skipIf(os.name == 'nt', 'POSIX shell installer')
+@unittest.skipIf(sys.platform == 'darwin', 'curl file:// fixture fails on macOS runner temp paths')
 class InstallerTests(unittest.TestCase):
     def run_install(self, args=(), shell='/bin/bash', corrupt=False):
         with tempfile.TemporaryDirectory() as tmp:
