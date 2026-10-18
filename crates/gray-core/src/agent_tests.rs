@@ -3485,3 +3485,85 @@ async fn malformed_calls_block_names_the_block_not_the_tool() {
     assert!(output.contains("line 1 column"), "got {output}");
     assert!(!output.contains(TOOL_NAME), "got {output}");
 }
+
+#[tokio::test]
+async fn valid_calls_block_expands_and_runs_each_call() {
+    let provider = FakeProvider::new(vec![
+        vec![
+            StreamEvent::tool_call_delta(
+                0,
+                Some("c-block".into()),
+                Some(TOOL_NAME.into()),
+                r#"[{"name": "lookup", "arguments": {"q": 1}}, {"name": "lookup", "arguments": {"q": 2}}]"#,
+            ),
+            StreamEvent::message_complete(Some(StopReason::ToolUse), None),
+        ],
+        end_script(),
+    ]);
+    let executor = FakeExecutor::new(ToolOutput::ok("hit"));
+    let call_log = executor.calls.clone();
+    let call_args = executor.call_args.clone();
+    let mut agent =
+        Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
+    let events = agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .unwrap();
+    let logged = call_args.lock().expect("args lock");
+    assert_eq!(logged.len(), 2, "both block elements should run: {logged:?}");
+    assert_eq!(logged[0].1["q"], 1);
+    assert_eq!(logged[1].1["q"], 2);
+    drop(logged);
+    let output = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolResult {
+                id,
+                output,
+                is_error,
+            } if id == "c-block" => Some((output.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("expected one merged result for the block");
+    assert!(!output.1, "block ran: {}", output.0);
+    assert!(output.0.contains("ran 2/2"), "got {}", output.0);
+}
+
+#[tokio::test]
+async fn malformed_calls_block_runs_salvageable_elements() {
+    let provider = FakeProvider::new(vec![
+        vec![
+            StreamEvent::tool_call_delta(
+                0,
+                Some("c-block".into()),
+                Some(TOOL_NAME.into()),
+                r#"[{"name": "lookup", "arguments": {"q": 7}} , {"name": "lookup", "arguments": {"q": truncated]"#,
+            ),
+            StreamEvent::message_complete(Some(StopReason::ToolUse), None),
+        ],
+        end_script(),
+    ]);
+    let executor = FakeExecutor::new(ToolOutput::ok("hit"));
+    let call_args = executor.call_args.clone();
+    let mut agent =
+        Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
+    let events = agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .unwrap();
+    let logged = call_args.lock().expect("args lock");
+    assert_eq!(logged.len(), 1, "only the intact element runs: {logged:?}");
+    assert_eq!(logged[0].1["q"], 7);
+    drop(logged);
+    let output = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolResult { id, output, .. } if id == "c-block" => {
+                Some(output.clone())
+            }
+            _ => None,
+        })
+        .expect("expected a merged result for the block");
+    assert!(output.contains("ran 1/"), "got {output}");
+    assert!(output.contains("dropped"), "got {output}");
+}

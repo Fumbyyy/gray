@@ -220,6 +220,59 @@ impl Agent {
         }
     }
 
+    /// Run the elements of a fused call block sequentially, merging results
+    /// into one ToolOutput so the outer call id still gets a single result.
+    async fn execute_call_block(
+        &self,
+        ctx: &ToolContext,
+        calls: Vec<(String, serde_json::Value)>,
+        dropped: usize,
+        parse_error: Option<String>,
+    ) -> ToolOutput {
+        let total = calls.len() + dropped;
+        let mut ran = 0usize;
+        let mut sections = Vec::with_capacity(calls.len() + 1);
+        for (i, (name, args)) in calls.iter().enumerate() {
+            if ctx.cancel.is_cancelled() {
+                sections.push(format!("== call {}/{total}: cancelled by user ==", i + 1));
+                break;
+            }
+            let out = match self.preflight(name, args).await {
+                Ok(serde_json::Value::Array(_)) => ToolOutput::error(
+                    "nested call blocks are not supported — send the calls as a flat block",
+                ),
+                Ok(eff) => match tokio::time::timeout(
+                    self.tool_timeout,
+                    self.executor.execute(ctx, name, eff),
+                )
+                .await
+                {
+                    Ok(o) => o,
+                    Err(_) => ToolOutput::error(format!(
+                        "Tool '{name}' timed out after {}s",
+                        self.tool_timeout.as_secs()
+                    )),
+                },
+                Err(e) => e,
+            };
+            if !out.is_error {
+                ran += 1;
+            }
+            sections.push(format!("== call {}/{total}: {name} ==\n{}", i + 1, out.content));
+        }
+        let mut head = format!("tool-call block: ran {ran}/{total} call(s)");
+        if dropped > 0 {
+            head.push_str(&format!(", dropped {dropped} unparseable element(s)"));
+            if let Some(e) = parse_error {
+                head.push_str(&format!(" ({e})"));
+            }
+        }
+        sections.insert(0, head);
+        let mut out = ToolOutput::ok(sections.join("\n\n"));
+        out.is_error = ran == 0;
+        out
+    }
+
     async fn preflight(
         &self,
         name: &str,
@@ -233,11 +286,37 @@ impl Agent {
         }
         if let serde_json::Value::String(s) = args
             && s.trim_start().starts_with('[')
-            && let Err(e) = serde_json::from_str::<serde_json::Value>(s)
         {
-            return Err(ToolOutput::error(format!(
-                "The tool-call block is not valid JSON ({e}), so none of its calls ran. Check the brackets and quotes, then resend the whole block."
-            )));
+            match serde_json::from_str::<serde_json::Value>(s) {
+                Ok(v) => {
+                    if block_args(&v).is_some() {
+                        return Ok(v);
+                    }
+                }
+                Err(e) => {
+                    let (calls, dropped) = salvage_call_block(s);
+                    if calls.is_empty() {
+                        return Err(ToolOutput::error(format!(
+                            "The tool-call block is not valid JSON ({e}), so none of its calls ran. Check the brackets and quotes, then resend the whole block."
+                        )));
+                    }
+                    return Ok(serde_json::json!({
+                        CALL_BLOCK_SALVAGE: {
+                            "calls": calls
+                                .iter()
+                                .map(|(n, a)| serde_json::json!({"name": n, "arguments": a}))
+                                .collect::<Vec<_>>(),
+                            "dropped": dropped,
+                            "parse_error": e.to_string(),
+                        }
+                    }));
+                }
+            }
+        }
+        if let serde_json::Value::Array(_) = args
+            && block_args(args).is_some()
+        {
+            return Ok(args.clone());
         }
         if !args.is_object() {
             let got = match args {
@@ -1393,6 +1472,32 @@ impl Agent {
                     }
                 };
 
+                if let Some((calls, dropped, parse_error)) = block_args(&effective_args) {
+                    let output = self
+                        .execute_call_block(&ctx, calls, dropped, parse_error)
+                        .await;
+                    let output = self.apply_tool_after(name, &output).await;
+                    Self::bill_tool_usage(
+                        &mut billed,
+                        name,
+                        &output,
+                        ctx.session_id.as_deref(),
+                    );
+                    for hook in &self.hooks {
+                        hook.post_tool(name, &output).await;
+                    }
+                    emit!(AgentEvent::tool_result(
+                        id.clone(),
+                        output.content.clone(),
+                        output.is_error,
+                    ));
+                    self.messages.push(Message {
+                        role: Role::User,
+                        injected: false,
+                        content: output.message_blocks(id),
+                    });
+                    continue;
+                }
                 let mut exec_fut: futures::future::BoxFuture<'_, ToolOutput> =
                     match self.tool_output_sink(id) {
                         Some(sink) => Box::pin(crate::agent::scope_tool_output(
@@ -1584,6 +1689,79 @@ fn call_from_json(v: serde_json::Value) -> Option<(String, serde_json::Value)> {
         })
         .unwrap_or_else(|| serde_json::json!({}));
     Some((name, args))
+}
+
+const CALL_BLOCK_SALVAGE: &str = "__gray_call_block_salvaged";
+
+/// A fused call block decodes to (element calls, dropped elements, original
+/// parse error). Plain arrays with no call-shaped elements are not blocks.
+fn block_args(
+    v: &serde_json::Value,
+) -> Option<(Vec<(String, serde_json::Value)>, usize, Option<String>)> {
+    match v {
+        serde_json::Value::Array(items) => {
+            let mut calls = Vec::new();
+            let mut dropped = 0usize;
+            for item in items {
+                match call_from_json(item.clone()) {
+                    Some(c) => calls.push(c),
+                    None => dropped += 1,
+                }
+            }
+            (!calls.is_empty()).then_some((calls, dropped, None))
+        }
+        serde_json::Value::Object(o) => {
+            let b = o.get(CALL_BLOCK_SALVAGE)?;
+            let calls: Vec<(String, serde_json::Value)> = b
+                .get("calls")?
+                .as_array()?
+                .iter()
+                .cloned()
+                .filter_map(call_from_json)
+                .collect();
+            if calls.is_empty() {
+                return None;
+            }
+            let dropped = b
+                .get("dropped")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            let parse_error = b
+                .get("parse_error")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            Some((calls, dropped, parse_error))
+        }
+        _ => None,
+    }
+}
+
+/// Best-effort recovery for a `[{..}, ..]` call block that failed strict JSON
+/// parsing: each balanced top-level object that decodes to a call is kept.
+fn salvage_call_block(text: &str) -> (Vec<(String, serde_json::Value)>, usize) {
+    let mut calls = Vec::new();
+    let mut dropped = 0usize;
+    let mut cursor = 0usize;
+    while let Some(rel) = text[cursor..].find('{') {
+        let start = cursor + rel;
+        match json_slice(text, start) {
+            Some(js) => {
+                match serde_json::from_str::<serde_json::Value>(js)
+                    .ok()
+                    .and_then(call_from_json)
+                {
+                    Some(c) => calls.push(c),
+                    None => dropped += 1,
+                }
+                cursor = start + js.len();
+            }
+            None => {
+                dropped += 1;
+                cursor = start + 1;
+            }
+        }
+    }
+    (calls, dropped)
 }
 
 fn json_slice(text: &str, start: usize) -> Option<&str> {
