@@ -676,3 +676,22 @@ fn split_synthetic_prompt_parts_notifications() {
         ]
     );
 }
+
+#[test]
+fn wrapped_rows_keep_the_leading_indent() {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let text =
+        "  plugin gray-gateway exited (exit 1) — restarted; see ~/.gray/logs/sidecar-stderr.log"
+            .to_string();
+    for max_w in [24usize, 40, 60] {
+        let rows = wrap_styled_line(Line::from(Span::styled(text.clone(), dim)), max_w);
+        assert!(rows.len() > 1, "expected a wrap at width {max_w}");
+        for row in &rows {
+            let row_text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                row_text.starts_with("  "),
+                "wrapped row lost its leading indent at width {max_w}: {row_text:?}"
+            );
+        }
+    }
+}

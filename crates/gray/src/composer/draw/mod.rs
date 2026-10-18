@@ -724,6 +724,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         if !home_mode {
             let (max_tokens, max_label) = crate::setup::model_context_info(&tui.model_name);
 
+            let has_usage = tui.latest_usage.or(tui.cumulative_usage).is_some();
             let (used_tokens, hit_rate) = if let Some(u) = tui.latest_usage.or(tui.cumulative_usage)
             {
                 (
@@ -802,6 +803,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     },
                     "context" if level.get() > 2 => Seg::new(ctx_compact.clone(), muted),
                     "context" => Seg::new(ctx_display.clone(), muted),
+                    "cache" if !has_usage => Seg::new("", muted),
                     "cache" => Seg::new(cache_display.clone(), cache_color),
                     "timer" => cache_timer
                         .as_ref()
