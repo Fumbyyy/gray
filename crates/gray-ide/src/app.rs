@@ -125,6 +125,7 @@ enum Cmd {
     PreviewFile(String),
     ToggleSessions,
     ResumeSession(String),
+    DiscardChanges,
 }
 
 struct ActiveTurn {
@@ -157,7 +158,7 @@ pub struct GrayApp {
     panel: Option<Panel>,
     turns: HashMap<String, ActiveTurn>,
     terminal_lines: Vec<String>,
-    terminal_rx: Option<Receiver<String>>,
+    terminal_rx: Vec<Receiver<String>>,
     scroll: ScrollHandle,
     expanded: HashSet<String>,
     tree: Vec<FileEntry>,
@@ -253,7 +254,7 @@ impl GrayApp {
             panel: None,
             turns: HashMap::new(),
             terminal_lines: Vec::new(),
-            terminal_rx: None,
+            terminal_rx: Vec::new(),
             scroll: ScrollHandle::new(),
             expanded: HashSet::new(),
             tree: Vec::new(),
@@ -345,7 +346,7 @@ impl GrayApp {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| p.clone());
-        self.store.append(Event::ProjectAdded {
+        self.persist(Event::ProjectAdded {
             id: id.clone(),
             name,
             path: p,
@@ -395,6 +396,11 @@ impl GrayApp {
             provider::default_model(&provider),
         );
         let mode = self.store.state.setting("default_mode", "full");
+        let mode = if provider == "gray" {
+            "full".to_string()
+        } else {
+            mode
+        };
         (provider, model, mode)
     }
 
@@ -402,7 +408,7 @@ impl GrayApp {
         let pid = self.active_project.clone()?;
         let (provider, model, mode) = self.defaults();
         let id = new_id();
-        self.store.append(Event::ThreadCreated {
+        self.persist(Event::ThreadCreated {
             id: id.clone(),
             project_id: pid,
             title: "New thread".into(),
@@ -450,7 +456,7 @@ impl GrayApp {
         let Some(thread) = thread else { return };
         if thread.title == "New thread" {
             let title: String = text.lines().next().unwrap_or("").chars().take(48).collect();
-            self.store.append(Event::ThreadRenamed {
+            self.persist(Event::ThreadRenamed {
                 id: tid.clone(),
                 title,
             });
@@ -458,7 +464,7 @@ impl GrayApp {
         if git::is_repo(&root)
             && let Some(tree) = git::checkpoint(&root)
         {
-            self.store.append(Event::ActivityAdded {
+            self.persist(Event::ActivityAdded {
                 thread_id: tid.clone(),
                 id: new_id(),
                 kind: "checkpoint".into(),
@@ -467,7 +473,7 @@ impl GrayApp {
                 at: now(),
             });
         }
-        self.store.append(Event::MessageAdded {
+        self.persist(Event::MessageAdded {
             thread_id: tid.clone(),
             id: new_id(),
             role: Role::User,
@@ -478,7 +484,11 @@ impl GrayApp {
         let turn = provider::start(TurnRequest {
             provider: thread.provider.clone(),
             model: thread.model.clone(),
-            mode: thread.mode.clone(),
+            mode: if thread.provider == "gray" {
+                "full".to_string()
+            } else {
+                thread.mode.clone()
+            },
             prompt,
             cwd: root,
             effort: thread.effort.clone(),
@@ -519,6 +529,7 @@ impl GrayApp {
             "archive" => Cmd::Archive,
             "checkpoint" => Cmd::Checkpoint,
             "restore" => Cmd::Restore,
+            "discard" => Cmd::DiscardChanges,
             "stop" => Cmd::Stop,
             "settle" => Cmd::Settle,
             "plugins" => Cmd::TogglePlugins,
@@ -594,7 +605,7 @@ impl GrayApp {
                 .map(|(p, s)| Some(p) == provider.as_ref() && s == &sid)
                 .unwrap_or(false);
             if let (Some(provider), false) = (provider, known) {
-                self.store.append(Event::ThreadSession {
+                self.persist(Event::ThreadSession {
                     id: tid,
                     provider,
                     session: sid,
@@ -602,7 +613,7 @@ impl GrayApp {
             }
         }
         for (tid, kind, label, detail) in activities {
-            self.store.append(Event::ActivityAdded {
+            self.persist(Event::ActivityAdded {
                 thread_id: tid,
                 id: new_id(),
                 kind,
@@ -615,7 +626,7 @@ impl GrayApp {
             changed = true;
             let text = self.turns.remove(&tid).map(|a| a.text).unwrap_or_default();
             if !text.trim().is_empty() {
-                self.store.append(Event::MessageAdded {
+                self.persist(Event::MessageAdded {
                     thread_id: tid.clone(),
                     id: new_id(),
                     role: Role::Assistant,
@@ -626,7 +637,7 @@ impl GrayApp {
             let status = match result {
                 Ok(()) => "completed".to_string(),
                 Err(e) => {
-                    self.store.append(Event::ActivityAdded {
+                    self.persist(Event::ActivityAdded {
                         thread_id: tid.clone(),
                         id: new_id(),
                         kind: "error".into(),
@@ -641,7 +652,7 @@ impl GrayApp {
                     "error".to_string()
                 }
             };
-            self.store.append(Event::TurnFinished {
+            self.persist(Event::TurnFinished {
                 thread_id: tid,
                 status,
                 at: now(),
@@ -666,20 +677,29 @@ impl GrayApp {
                 }
             }
         }
-        if let Some(rx) = &self.terminal_rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(line) => {
-                        self.terminal_lines.push(line);
-                        changed = true;
+        if !self.terminal_rx.is_empty() {
+            let mut i = 0;
+            while i < self.terminal_rx.len() {
+                let mut closed = false;
+                loop {
+                    match self.terminal_rx[i].try_recv() {
+                        Ok(line) => {
+                            self.terminal_lines.push(line);
+                            changed = true;
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            closed = true;
+                            break;
+                        }
                     }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        self.terminal_rx = None;
-                        self.refresh_workspace(cx);
-                        changed = true;
-                        break;
-                    }
+                }
+                if closed {
+                    self.terminal_rx.remove(i);
+                    self.refresh_workspace(cx);
+                    changed = true;
+                } else {
+                    i += 1;
                 }
             }
             if self.terminal_lines.len() > 2000 {
@@ -707,7 +727,7 @@ impl GrayApp {
             return;
         };
         self.terminal_lines.push(format!("$ {cmd}"));
-        self.terminal_rx = Some(workspace::run_shell(&root, &cmd));
+        self.terminal_rx.push(workspace::run_shell(&root, &cmd));
         cx.notify();
     }
 
@@ -829,7 +849,15 @@ impl GrayApp {
                 ));
             }
         }
+        let active_provider = self
+            .active_thread
+            .as_ref()
+            .and_then(|id| self.store.state.thread(id))
+            .map(|t| t.provider.clone());
         for (id, label) in MODES {
+            if active_provider.as_deref() == Some("gray") && *id != "full" {
+                continue;
+            }
             items.push((
                 format!("Mode: {label}"),
                 k("Access"),
@@ -907,22 +935,35 @@ impl GrayApp {
         out
     }
 
+    fn persist(&mut self, e: Event) {
+        if let Err(err) = self.store.append(e) {
+            self.toast(format!("Couldn't save: {err}"), true);
+        }
+    }
+
+    fn dirty_tabs(&self, cx: &App) -> usize {
+        self.tabs
+            .iter()
+            .filter(|t| t.editor.read(cx).value().to_string() != t.saved)
+            .count()
+    }
+
     fn configure(&mut self, provider: Option<String>, model: Option<String>, mode: Option<String>) {
         let Some(tid) = self.active_thread.clone() else {
             if let Some(p) = &provider {
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: "default_provider".into(),
                     value: p.clone(),
                 });
             }
             if let (Some(p), Some(m)) = (&provider, &model) {
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: format!("default_model.{p}"),
                     value: m.clone(),
                 });
             }
             if let Some(m) = &mode {
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: "default_mode".into(),
                     value: m.clone(),
                 });
@@ -933,6 +974,13 @@ impl GrayApp {
             return;
         };
         let provider_id = provider.clone().unwrap_or(t.provider.clone());
+        let mode = mode.or(Some(t.mode.clone())).map(|m| {
+            if provider_id == "gray" {
+                "full".to_string()
+            } else {
+                m
+            }
+        });
         let model = model.unwrap_or_else(|| {
             if provider.is_some() && provider_id != t.provider {
                 provider::default_model(&provider_id).to_string()
@@ -940,11 +988,11 @@ impl GrayApp {
                 t.model.clone()
             }
         });
-        self.store.append(Event::ThreadConfigured {
+        self.persist(Event::ThreadConfigured {
             id: tid,
             provider: provider_id,
             model,
-            mode: mode.unwrap_or(t.mode),
+            mode: mode.unwrap_or_default(),
         });
     }
 
@@ -982,7 +1030,7 @@ impl GrayApp {
                 } else {
                     ThemeMode::Dark
                 };
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: "theme".into(),
                     value: next.name().into(),
                 });
@@ -1009,6 +1057,21 @@ impl GrayApp {
                 if MODES.iter().any(|x| x.0 == m) {
                     self.configure(None, None, Some(m));
                 }
+            }
+            Cmd::DiscardChanges => {
+                let before = self.tabs.len();
+                self.tabs
+                    .retain(|t| t.editor.read(cx).value().to_string() == t.saved);
+                let dropped = before - self.tabs.len();
+                self.active_tab = self.active_tab.filter(|i| *i < self.tabs.len());
+                self.toast(
+                    if dropped > 0 {
+                        format!("Discarded edits in {dropped} file(s)")
+                    } else {
+                        "Nothing to discard".into()
+                    },
+                    dropped == 0,
+                );
             }
             Cmd::Branch(b) | Cmd::NewBranch(b) if b.is_empty() => {
                 self.toast("Branch name required", true)
@@ -1038,7 +1101,7 @@ impl GrayApp {
                     .and_then(|t| self.store.state.thread(t))
                     .cloned()
                 {
-                    self.store.append(Event::ThreadPinned {
+                    self.persist(Event::ThreadPinned {
                         id: t.id,
                         pinned: !t.pinned,
                     });
@@ -1051,7 +1114,7 @@ impl GrayApp {
                     .and_then(|t| self.store.state.thread(t))
                     .cloned()
                 {
-                    self.store.append(Event::ThreadArchived {
+                    self.persist(Event::ThreadArchived {
                         id: t.id,
                         archived: !t.archived,
                     });
@@ -1065,14 +1128,14 @@ impl GrayApp {
                     if let Some(t) = self.turns.remove(&id) {
                         t.turn.cancel();
                     }
-                    self.store.append(Event::ThreadDeleted { id });
+                    self.persist(Event::ThreadDeleted { id });
                 }
             }
             Cmd::Rename(title) => {
                 if let Some(id) = self.active_thread.clone()
                     && !title.is_empty()
                 {
-                    self.store.append(Event::ThreadRenamed { id, title });
+                    self.persist(Event::ThreadRenamed { id, title });
                 }
             }
             Cmd::OpenFile(path) => self.open_file(&path, window, cx),
@@ -1080,7 +1143,7 @@ impl GrayApp {
                 if let (Some(root), Some(tid)) = (self.work_root(), self.active_thread.clone())
                     && let Some(tree) = git::checkpoint(&root)
                 {
-                    self.store.append(Event::ActivityAdded {
+                    self.persist(Event::ActivityAdded {
                         thread_id: tid,
                         id: new_id(),
                         kind: "checkpoint".into(),
@@ -1092,6 +1155,10 @@ impl GrayApp {
                 }
             }
             Cmd::Restore => {
+                if self.dirty_tabs(cx) > 0 {
+                    self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                    return;
+                }
                 let tree = self
                     .active_thread
                     .as_ref()
@@ -1124,12 +1191,20 @@ impl GrayApp {
                 }
             }
             Cmd::AddProject(p) => {
+                if self.dirty_tabs(cx) > 0 {
+                    self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                    return;
+                }
                 self.add_project(Path::new(&p));
                 self.tabs.clear();
                 self.active_tab = None;
                 self.refresh_workspace(cx);
             }
             Cmd::Project(id) => {
+                if self.dirty_tabs(cx) > 0 {
+                    self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                    return;
+                }
                 self.active_project = Some(id.clone());
                 self.active_thread = self
                     .store
@@ -1142,6 +1217,10 @@ impl GrayApp {
                 self.refresh_workspace(cx);
             }
             Cmd::Thread(id) => {
+                if self.dirty_tabs(cx) > 0 {
+                    self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                    return;
+                }
                 self.active_thread = Some(id);
                 self.tabs.clear();
                 self.active_tab = None;
@@ -1194,7 +1273,7 @@ impl GrayApp {
                     .and_then(|t| self.store.state.thread(t))
                     .cloned()
                 {
-                    self.store.append(Event::ThreadSettled {
+                    self.persist(Event::ThreadSettled {
                         id: t.id,
                         settled: !t.settled,
                     });
@@ -1207,7 +1286,7 @@ impl GrayApp {
                     } else {
                         now() + minutes * 60_000
                     };
-                    self.store.append(Event::ThreadSnoozed { id, until });
+                    self.persist(Event::ThreadSnoozed { id, until });
                 }
             }
             Cmd::ToggleViewer => {
@@ -1240,25 +1319,25 @@ impl GrayApp {
                     .store
                     .state
                     .setting("default_model.gray", &provider::default_model("gray"));
-                self.store.append(Event::ThreadConfigured {
+                self.persist(Event::ThreadConfigured {
                     id: tid.clone(),
                     provider: "gray".into(),
                     model,
                     mode: "full".into(),
                 });
-                self.store.append(Event::ThreadSession {
+                self.persist(Event::ThreadSession {
                     id: tid.clone(),
                     provider: "gray".into(),
                     session: id.clone(),
                 });
-                self.store.append(Event::ThreadRenamed {
+                self.persist(Event::ThreadRenamed {
                     id: tid,
                     title: format!("gray/{id}"),
                 });
                 self.toast(format!("Resuming {id}"), false);
             }
             Cmd::SetBackground(b) => {
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: "background".into(),
                     value: b.clone(),
                 });
@@ -1274,7 +1353,7 @@ impl GrayApp {
             Cmd::Effort(e) => {
                 if ["low", "medium", "high"].contains(&e.as_str()) {
                     if let Some(id) = self.active_thread.clone() {
-                        self.store.append(Event::ThreadEffort { id, effort: e });
+                        self.persist(Event::ThreadEffort { id, effort: e });
                     }
                 } else {
                     self.toast("Effort must be low, medium or high", true);
@@ -1299,9 +1378,15 @@ impl GrayApp {
                         .join(format!("{base}-worktrees"))
                         .join(&name);
                     match git::worktree_add(&root, &dir, &name) {
+                        Ok(()) if self.dirty_tabs(cx) > 0 => {
+                            self.toast(
+                                format!("Worktree {name} created; save or /discard to switch"),
+                                false,
+                            );
+                        }
                         Ok(()) => {
                             if let Some(id) = tid {
-                                self.store.append(Event::ThreadWorktree {
+                                self.persist(Event::ThreadWorktree {
                                     id,
                                     path: dir.display().to_string(),
                                 });
@@ -1334,7 +1419,14 @@ impl GrayApp {
         let Some(root) = self.work_root() else {
             return;
         };
-        let content = std::fs::read_to_string(root.join(rel)).unwrap_or_default();
+        let content = match std::fs::read_to_string(root.join(rel)) {
+            Ok(c) => c,
+            Err(e) => {
+                self.toast(format!("Can't open {rel}: {e}"), true);
+                cx.notify();
+                return;
+            }
+        };
         let lang = workspace::language_for(rel);
         let value = content.clone();
         let editor = cx.new(|cx| {
@@ -1364,7 +1456,14 @@ impl GrayApp {
             cx.notify();
             return;
         }
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.toast(format!("Can't preview {rel}: {e}"), true);
+                cx.notify();
+                return;
+            }
+        };
         let lang = workspace::language_for(rel);
         match &self.viewer {
             Some((p, st)) if p == rel => {
@@ -1390,10 +1489,11 @@ impl GrayApp {
             return;
         };
         for tab in &mut self.tabs {
-            let content = std::fs::read_to_string(root.join(&tab.path)).unwrap_or_default();
-            let v = content.clone();
-            tab.editor.update(cx, |s, cx| s.set_value(v, window, cx));
-            tab.saved = content;
+            if let Ok(content) = std::fs::read_to_string(root.join(&tab.path)) {
+                let v = content.clone();
+                tab.editor.update(cx, |s, cx| s.set_value(v, window, cx));
+                tab.saved = content;
+            }
         }
     }
 
@@ -1502,6 +1602,11 @@ impl GrayApp {
         if s != self.last_snapshot {
             let tmp = path.with_extension("tmp");
             if std::fs::write(&tmp, &s).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                }
                 let _ = std::fs::rename(&tmp, &path);
             }
             self.last_snapshot = s;
@@ -2710,7 +2815,7 @@ impl GrayApp {
                     .label(p.label)
                     .selected(dp == p.id)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.store.append(Event::SettingChanged {
+                        this.persist(Event::SettingChanged {
                             key: "default_provider".into(),
                             value: id.clone(),
                         });
@@ -2727,7 +2832,7 @@ impl GrayApp {
                     .label(*label)
                     .selected(dmode == *id)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.store.append(Event::SettingChanged {
+                        this.persist(Event::SettingChanged {
                             key: "default_mode".into(),
                             value: id_s.clone(),
                         });
@@ -3279,7 +3384,14 @@ fn expand_mentions(text: &str, root: &Path) -> String {
         if rel.is_empty() || rel.contains("..") || !seen.insert(rel.to_string()) {
             continue;
         }
-        if let Ok(content) = std::fs::read_to_string(root.join(rel)) {
+        let full = root.join(rel);
+        let inside = full
+            .canonicalize()
+            .ok()
+            .zip(root.canonicalize().ok())
+            .map(|(f, r)| f.starts_with(&r))
+            .unwrap_or(false);
+        if inside && let Ok(content) = std::fs::read_to_string(&full) {
             let lang = workspace::language_for(rel);
             out.push_str(&format!(
                 "\n\n<file path=\"{rel}\">\n```{lang}\n{content}\n```\n</file>"

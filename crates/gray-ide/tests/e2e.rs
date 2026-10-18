@@ -194,8 +194,28 @@ impl Gray {
         sleep(Duration::from_millis(150));
     }
 
+    fn focus_window(&self) {
+        let pid = self.app.as_ref().map(|c| c.id()).unwrap_or(0);
+        if pid == 0 {
+            return;
+        }
+        let _ = Command::new("xdotool")
+            .args(["search", "--pid", &pid.to_string()])
+            .env("DISPLAY", &self.display)
+            .output()
+            .map(|o| {
+                for w in String::from_utf8_lossy(&o.stdout).lines() {
+                    let _ = Command::new("xdotool")
+                        .args(["windowactivate", "--sync", w])
+                        .env("DISPLAY", &self.display)
+                        .status();
+                }
+            });
+    }
+
     fn send(&self, text: &str) {
-        for _ in 0..20 {
+        self.focus_window();
+        for _ in 0..30 {
             self.type_text(text);
             if self.state()["composer"] == text {
                 break;

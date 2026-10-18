@@ -2,7 +2,10 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
@@ -82,10 +85,12 @@ pub fn default_model(provider: &str) -> &'static str {
 pub struct Turn {
     pub rx: Receiver<ProviderEvent>,
     child: Arc<Mutex<Option<Child>>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Turn {
     pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
         if let Ok(mut guard) = self.child.lock()
             && let Some(child) = guard.as_mut()
         {
@@ -108,12 +113,18 @@ pub fn start(req: TurnRequest) -> Turn {
     let (tx, rx) = channel();
     let child = Arc::new(Mutex::new(None));
     let slot = child.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let flag = cancelled.clone();
     thread::spawn(move || {
-        let result = match req.provider.as_str() {
-            "fake" => run_fake(&req, &tx),
-            "claude" => run_process(claude_command(&req), &tx, &slot, parse_claude),
-            "codex" => run_process(codex_command(&req), &tx, &slot, parse_codex),
-            _ => run_process(gray_command(&req), &tx, &slot, parse_gray),
+        let result = if flag.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            match req.provider.as_str() {
+                "fake" => run_fake(&req, &tx, &flag),
+                "claude" => run_process(claude_command(&req), &tx, &slot, &flag, parse_claude),
+                "codex" => run_process(codex_command(&req), &tx, &slot, &flag, parse_codex),
+                _ => run_process(gray_command(&req), &tx, &slot, &flag, parse_gray),
+            }
         };
         match result {
             Ok(()) => {
@@ -124,7 +135,11 @@ pub fn start(req: TurnRequest) -> Turn {
             }
         }
     });
-    Turn { rx, child }
+    Turn {
+        rx,
+        child,
+        cancelled,
+    }
 }
 
 fn bin(env: &str, default: &str) -> String {
@@ -192,6 +207,7 @@ fn run_process(
     mut cmd: Command,
     tx: &Sender<ProviderEvent>,
     slot: &Arc<Mutex<Option<Child>>>,
+    cancelled: &Arc<AtomicBool>,
     parse: fn(&serde_json::Value, &mut ParseState) -> Vec<ProviderEvent>,
 ) -> Result<(), String> {
     cmd.stdin(Stdio::null())
@@ -202,8 +218,18 @@ fn run_process(
         .map_err(|e| format!("failed to start {:?}: {e}", cmd.get_program()))?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take();
+    if cancelled.load(Ordering::SeqCst) {
+        let _ = child.kill();
+        return Ok(());
+    }
     if let Ok(mut guard) = slot.lock() {
         *guard = Some(child);
+        if cancelled.load(Ordering::SeqCst)
+            && let Some(c) = guard.as_mut()
+        {
+            let _ = c.kill();
+            return Ok(());
+        }
     }
     let err_buf = Arc::new(Mutex::new(String::new()));
     let err_clone = err_buf.clone();
@@ -443,7 +469,11 @@ pub fn parse_codex(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEv
     out
 }
 
-fn run_fake(req: &TurnRequest, tx: &Sender<ProviderEvent>) -> Result<(), String> {
+fn run_fake(
+    req: &TurnRequest,
+    tx: &Sender<ProviderEvent>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<(), String> {
     let delay = Duration::from_millis(
         std::env::var("GRAY_IDE_FAKE_DELAY_MS")
             .ok()
@@ -501,6 +531,9 @@ fn run_fake(req: &TurnRequest, tx: &Sender<ProviderEvent>) -> Result<(), String>
         mode_label(&req.mode)
     );
     for chunk in reply.split_inclusive(' ') {
+        if cancelled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let _ = tx.send(ProviderEvent::Text(chunk.to_string()));
         thread::sleep(delay);
     }
