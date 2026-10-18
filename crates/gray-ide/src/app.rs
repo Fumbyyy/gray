@@ -2737,7 +2737,11 @@ fn render_item(item: &Item, t: &Theme) -> AnyElement {
                 .text_xs()
                 .text_color(color)
                 .child(icon)
-                .child(div().font_medium().child(label.clone()))
+                .child(div().font_family(t.mono_font_family.clone()).child(format!(
+                    "{} · {}",
+                    kind.to_uppercase(),
+                    label
+                )))
                 .child(div().truncate().text_color(t.muted_foreground).child(short))
                 .into_any_element()
         }
