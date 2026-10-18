@@ -120,8 +120,8 @@ pub fn open_in_browser(url: &str) {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn(),
-        "windows" => Command::new("cmd")
-            .args(["/c", "start", "", url])
+        "windows" => Command::new("explorer")
+            .arg(url)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn(),

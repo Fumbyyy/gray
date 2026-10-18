@@ -5,8 +5,10 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 const BLOCK: char = '\u{2580}';
+const ASCII_RAMP: &[u8] = b" .:-=+*#%@";
 
 type MascotRun = ((u8, u8, u8), (u8, u8, u8), usize);
+type AsciiRun = ((u8, u8, u8), char, usize);
 
 const MASCOT_PNG: &[u8] = include_bytes!("../assets/graychan.png");
 
@@ -70,9 +72,50 @@ impl MascotGrid {
         }
         out
     }
+
+    fn ascii_runs(&self, row: usize) -> Vec<AsciiRun> {
+        let mut out = Vec::new();
+        let mut x = 0;
+        while x < self.cols {
+            let rgb = self.px(x, row);
+            let lum = (rgb.0 as usize * 299 + rgb.1 as usize * 587 + rgb.2 as usize * 114) / 1000;
+            let ch = ASCII_RAMP[lum * (ASCII_RAMP.len() - 1) / 255] as char;
+            let mut n = 1;
+            while x + n < self.cols {
+                let rgb2 = self.px(x + n, row);
+                let lum2 =
+                    (rgb2.0 as usize * 299 + rgb2.1 as usize * 587 + rgb2.2 as usize * 114) / 1000;
+                if rgb2 != rgb || ASCII_RAMP[lum2 * (ASCII_RAMP.len() - 1) / 255] as char != ch {
+                    break;
+                }
+                n += 1;
+            }
+            out.push((rgb, ch, n));
+            x += n;
+        }
+        out
+    }
+
+    fn ascii_lines(&self, pad: usize) -> Vec<Line<'static>> {
+        let mut out = Vec::with_capacity(self.rows);
+        for row in 0..self.rows {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            for (rgb, ch, n) in self.ascii_runs(row) {
+                spans.push(Span::styled(
+                    ch.to_string().repeat(n),
+                    Style::default().fg(Color::Rgb(rgb.0, rgb.1, rgb.2)),
+                ));
+            }
+            out.push(Line::from(spans));
+        }
+        out
+    }
 }
 
-pub(crate) fn decode_grid(term_cols: u16, term_rows: u16) -> Option<MascotGrid> {
+fn load_scaled(term_cols: u16, term_rows: u16, px_per_cell: usize) -> Option<MascotGrid> {
     let cols = term_cols as usize;
     let rows = term_rows as usize;
     if cols < 20 || rows < 10 {
@@ -99,7 +142,7 @@ pub(crate) fn decode_grid(term_cols: u16, term_rows: u16) -> Option<MascotGrid> 
     let scaled = image::imageops::resize(
         &img,
         grid_cols as u32,
-        (grid_rows * 2) as u32,
+        (grid_rows * px_per_cell) as u32,
         image::imageops::FilterType::Lanczos3,
     );
     Some(MascotGrid {
@@ -107,6 +150,14 @@ pub(crate) fn decode_grid(term_cols: u16, term_rows: u16) -> Option<MascotGrid> 
         rows: grid_rows,
         px: scaled.into_raw(),
     })
+}
+
+pub(crate) fn decode_grid(term_cols: u16, term_rows: u16) -> Option<MascotGrid> {
+    load_scaled(term_cols, term_rows, 2)
+}
+
+fn decode_ascii_grid(term_cols: u16, term_rows: u16) -> Option<MascotGrid> {
+    load_scaled(term_cols, term_rows, 1)
 }
 
 pub(crate) fn mascot_lines(
@@ -117,7 +168,11 @@ pub(crate) fn mascot_lines(
     if std::env::var_os("NO_COLOR").is_some() {
         return None;
     }
-    mascot_lines_unchecked(term_cols, term_rows, center_in)
+    if crate::tui::unicode_safe() {
+        mascot_lines_unchecked(term_cols, term_rows, center_in)
+    } else {
+        ascii_lines_unchecked(term_cols, term_rows, center_in)
+    }
 }
 
 fn mascot_lines_unchecked(
@@ -133,11 +188,27 @@ fn mascot_lines_unchecked(
     Some(grid.lines(pad))
 }
 
+fn ascii_lines_unchecked(
+    term_cols: u16,
+    term_rows: u16,
+    center_in: Option<usize>,
+) -> Option<Vec<Line<'static>>> {
+    let grid = decode_ascii_grid(term_cols, term_rows)?;
+    let pad = center_in
+        .unwrap_or(term_cols as usize)
+        .saturating_sub(grid.cols)
+        / 2;
+    Some(grid.ascii_lines(pad))
+}
+
 pub(crate) fn print_mascot() -> bool {
     if !std::io::stdout().is_terminal() {
         return false;
     }
     let (cols, rows) = crossterm::terminal::size().unwrap_or((0, 0));
+    if !crate::tui::unicode_safe() || !crossterm::ansi_support::supports_ansi() {
+        return print_ascii_mascot(cols, rows);
+    }
     let Some(grid) = decode_grid(cols, rows) else {
         return false;
     };
@@ -161,6 +232,41 @@ pub(crate) fn print_mascot() -> bool {
             ));
         }
         line.push_str("\x1b[0m\r\n");
+        let _ = out.write_all(line.as_bytes());
+    }
+    let _ = out.flush();
+    true
+}
+
+fn print_ascii_mascot(term_cols: u16, term_rows: u16) -> bool {
+    let Some(grid) = decode_ascii_grid(term_cols, term_rows) else {
+        return false;
+    };
+    let color = crossterm::ansi_support::supports_ansi();
+    let pad = (term_cols as usize).saturating_sub(grid.cols) / 2;
+    let mut out = std::io::stdout().lock();
+    for row in 0..grid.rows {
+        let mut line = String::new();
+        if pad > 0 {
+            line.push_str(&" ".repeat(pad));
+        }
+        for (rgb, ch, n) in grid.ascii_runs(row) {
+            if color {
+                line.push_str(&format!(
+                    "\x1b[38;2;{};{};{}m{}",
+                    rgb.0,
+                    rgb.1,
+                    rgb.2,
+                    ch.to_string().repeat(n)
+                ));
+            } else {
+                line.push_str(&ch.to_string().repeat(n));
+            }
+        }
+        if color {
+            line.push_str("\x1b[0m");
+        }
+        line.push_str("\r\n");
         let _ = out.write_all(line.as_bytes());
     }
     let _ = out.flush();

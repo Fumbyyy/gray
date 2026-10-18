@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -110,9 +110,60 @@ pub fn print_wrapped(text: &str, pad: usize) {
 }
 
 pub const LOGO: &str = include_str!("../assets/logo.txt");
+pub const LOGO_ASCII: &str = include_str!("../assets/logo-ascii.txt");
+
+#[cfg(windows)]
+fn modern_windows_terminal() -> bool {
+    use std::env::{var, var_os};
+    var_os("WT_SESSION").is_some()
+        || var_os("TERM_PROGRAM").is_some()
+        || var_os("WEZTERM_PANE").is_some()
+        || var_os("KONSOLE_VERSION").is_some()
+        || var_os("VTE_VERSION").is_some()
+        || var_os("ANSICON").is_some()
+        || var_os("MSYSTEM").is_some()
+        || var_os("TERM").is_some()
+        || var("ConEmuANSI").map_or(false, |v| v == "ON")
+}
+
+pub fn unicode_safe() -> bool {
+    match std::env::var("GRAY_ASCII_ART")
+        .map(|v| v.trim().to_lowercase())
+        .as_deref()
+    {
+        Ok("1" | "true" | "yes" | "on") => return false,
+        Ok("0" | "false" | "no" | "off") => return true,
+        _ => {}
+    }
+    if !std::io::stdout().is_terminal() {
+        return true;
+    }
+    if std::env::var("TERM").map_or(false, |t| t == "dumb") {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        return modern_windows_terminal();
+    }
+    #[allow(unreachable_code)]
+    true
+}
+
+pub(crate) fn arrow_glyph() -> &'static str {
+    glyph("❯", ">")
+}
+
+pub(crate) fn glyph(unicode: &'static str, ascii: &'static str) -> &'static str {
+    if unicode_safe() {
+        unicode
+    } else {
+        ascii
+    }
+}
 
 pub fn logo_lines() -> Vec<String> {
-    LOGO.lines()
+    let src = if unicode_safe() { LOGO } else { LOGO_ASCII };
+    src.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| format!("  {l}"))
         .collect()
@@ -141,12 +192,15 @@ pub fn print_logo() {
         return;
     }
     let no_color = std::env::var_os("NO_COLOR").is_some();
+    let ansi = crossterm::ansi_support::supports_ansi();
     let lines = logo_lines();
     let rows = lines.len().max(1) as f32;
     let max_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(1) as f32;
 
     for (row, line) in lines.iter().enumerate() {
-        if no_color {
+        if !ansi {
+            print!("\r{line}\r\n");
+        } else if no_color {
             print!("\r\x1b[2m{line}\x1b[0m\r\n");
         } else {
             let mut formatted = String::new();

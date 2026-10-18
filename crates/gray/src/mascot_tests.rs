@@ -1,4 +1,4 @@
-use super::{MascotGrid, decode_grid, mascot_lines_unchecked};
+use super::{MascotGrid, ascii_lines_unchecked, decode_grid, mascot_lines_unchecked};
 use ratatui::backend::TestBackend;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
@@ -116,6 +116,30 @@ fn mascot_art_paints_as_half_block_cells() {
 }
 
 #[test]
+fn ascii_mascot_uses_only_plain_glyphs() {
+    let lines = ascii_lines_unchecked(120, 40, Some(120)).expect("ascii path decodes");
+    assert!(!lines.is_empty());
+    let mut inked = 0usize;
+    for line in &lines {
+        let width: usize = line.spans.iter().map(|s| display_width(&s.content)).sum();
+        assert!(width <= 120, "line wider than the terminal: {width}");
+        for span in &line.spans {
+            for c in span.content.chars() {
+                assert!(
+                    c.is_ascii() && (c.is_ascii_graphic() || c == ' '),
+                    "non-ascii glyph in fallback art: {:?}",
+                    span.content
+                );
+                if c.is_ascii_graphic() {
+                    inked += 1;
+                }
+            }
+        }
+    }
+    assert!(inked > 100, "ascii art rendered almost empty: {inked}");
+}
+
+#[test]
 fn hehe_toggle_drops_the_mascot_entry() {
     use crate::composer::TranscriptEntry;
     let mut entries = vec![
@@ -208,3 +232,4 @@ fn welcome_sweep_draws_to_the_full_mark() {
         "frames must hold the banner's height"
     );
 }
+

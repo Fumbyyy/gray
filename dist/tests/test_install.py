@@ -9,6 +9,7 @@ import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'install.sh'
 
+@unittest.skipIf(os.name == 'nt', 'POSIX shell installer')
 class InstallerTests(unittest.TestCase):
     def run_install(self, args=(), shell='/bin/bash', corrupt=False):
         with tempfile.TemporaryDirectory() as tmp:

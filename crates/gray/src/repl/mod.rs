@@ -11,9 +11,11 @@ use gray_core::message::Message;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-static TURN_STATE: StdMutex<Option<tokio_util::sync::CancellationToken>> = StdMutex::new(None);
+pub(crate) static TURN_STATE: StdMutex<Option<tokio_util::sync::CancellationToken>> =
+    StdMutex::new(None);
 
-static TURN_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static TURN_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) struct TurnInFlightGuard;
 
@@ -154,15 +156,15 @@ pub mod attachments;
 pub mod commands;
 pub(crate) mod cron;
 mod customize;
-mod dispatch;
+pub(crate) mod dispatch;
 pub mod format;
 pub(crate) mod gateway_panel;
 pub(crate) mod handlers;
 pub(crate) mod jobs;
-mod key_watcher;
+pub(crate) mod key_watcher;
 pub(crate) mod maintenance;
 pub(crate) mod plugin_cmds;
-mod prompt_turn;
+pub(crate) mod prompt_turn;
 mod session;
 pub(crate) mod status;
 pub(crate) mod usage_panel;
@@ -203,6 +205,15 @@ pub(crate) fn say_lines(
     tui: Option<&crate::composer::SharedTui>,
     lines: Vec<ratatui::text::Line<'static>>,
 ) {
+    if crate::ide::emit_output(
+        &lines
+            .iter()
+            .map(|l| format!("{l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ) {
+        return;
+    }
     if let Some(t) = tui {
         let mut t = t.lock().expect("tui lock");
         t.push_styled_lines_with_hyperlinks(lines, &[], 0);
@@ -215,6 +226,9 @@ pub(crate) fn say_lines(
 }
 
 pub(crate) fn say(tui: Option<&crate::composer::SharedTui>, msg: &str) {
+    if crate::ide::emit_output(msg) {
+        return;
+    }
     if let Some(t) = tui {
         let mut t = t.lock().expect("tui lock");
 
@@ -225,6 +239,23 @@ pub(crate) fn say(tui: Option<&crate::composer::SharedTui>, msg: &str) {
         t.ensure_gap();
     } else {
         println!("{msg}");
+    }
+}
+
+pub(crate) fn say_err(tui: Option<&crate::composer::SharedTui>, msg: &str) {
+    if crate::ide::emit_output(msg) {
+        return;
+    }
+    if let Some(t) = tui {
+        let mut t = t.lock().expect("tui lock");
+
+        for line in msg.split('\n') {
+            t.push_dim(format!("  {line}"));
+        }
+
+        t.ensure_gap();
+    } else {
+        eprintln!("{msg}");
     }
 }
 
@@ -284,7 +315,12 @@ pub(crate) fn push_provider_connected(
     }
     let Some((shared, _)) = tui else {
         if let Some((old, new)) = clamped {
-            println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
+            say(
+                None,
+                &format!(
+                    "Thinking effort clamped from {old} to {new} (not supported by this model)"
+                ),
+            );
         }
         return;
     };
@@ -645,7 +681,7 @@ pub async fn run_repl_mode(
         match store.load(&sid).await {
             Ok((meta, entries)) => loaded = Some((sid, meta, entries, store)),
             Err(e) => {
-                println!("could not resume session {id}: {e}");
+                say(None, &format!("could not resume session {id}: {e}"));
             }
         }
     }
@@ -679,7 +715,7 @@ pub async fn run_repl_mode(
                     Some(l) => match store.load(&l.id).await {
                         Ok((meta, entries)) => Some((l.id.clone(), meta, entries)),
                         Err(e) => {
-                            println!("could not resume: {e}");
+                            say(None, &format!("could not resume: {e}"));
                             None
                         }
                     },
@@ -700,7 +736,12 @@ pub async fn run_repl_mode(
         }
 
         if let Some((old, new)) = normalize_adopted_model(config) {
-            println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
+            say(
+                None,
+                &format!(
+                    "Thinking effort clamped from {old} to {new} (not supported by this model)"
+                ),
+            );
         }
         if let Some(ledger) = gray_plugin::builder::current_file_ledger() {
             ledger.clear();
@@ -727,7 +768,10 @@ pub async fn run_repl_mode(
     }
 
     if let Some((old, new)) = normalize_adopted_model(config) {
-        println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
+        say(
+            None,
+            &format!("Thinking effort clamped from {old} to {new} (not supported by this model)"),
+        );
     }
 
     let startup_hint = if interactive && resumed_session_info.is_none() {
@@ -806,7 +850,8 @@ pub async fn run_repl_mode(
                     previews: Some(&tool_previews),
                 },
                 vec![format!(
-                    "\u{2b22} Resumed session {} ({} messages)",
+                    "{} Resumed session {} ({} messages)",
+                    crate::tui::glyph("\u{2b22}", "#"),
                     sid.as_str(),
                     n_entries
                 )],
@@ -1044,15 +1089,21 @@ pub async fn run_repl_mode(
                             let (header, body) = cron::job_card_lines(j);
                             shared.lock().expect("tui lock").push_tool_box(header, body);
                         }
-                        (cron::WakeCard::Job(j), None) => println!(
-                            "background job {} finished ({}) after {} \u{b7} log {}",
-                            j.id, j.outcome, j.elapsed, j.log
+                        (cron::WakeCard::Job(j), None) => say(
+                            None,
+                            &format!(
+                                "background job {} finished ({}) after {} \u{b7} log {}",
+                                j.id, j.outcome, j.elapsed, j.log
+                            ),
                         ),
-                        (cron::WakeCard::Cron(c), None) => println!(
-                            "cron: {}",
-                            crate::cron_fire::format_delivery_plain(
-                                &c.name, &c.body, c.reminder, c.failed
-                            )
+                        (cron::WakeCard::Cron(c), None) => say(
+                            None,
+                            &format!(
+                                "cron: {}",
+                                crate::cron_fire::format_delivery_plain(
+                                    &c.name, &c.body, c.reminder, c.failed
+                                )
+                            ),
                         ),
                         (cron::WakeCard::Text(text), _) => {
                             say(tui.as_ref().map(|(s, _)| s), text);
@@ -1075,7 +1126,7 @@ pub async fn run_repl_mode(
                                 t.push_user_prompt(&line, &m.attachments, true);
                                 let _ = t.draw();
                             }
-                            None => println!("{line}"),
+                            None => say(None, &line),
                         }
                         images.extend(m.attachments.iter().cloned());
                     }
@@ -1230,7 +1281,10 @@ pub async fn run_repl_mode(
                             true,
                         );
                     } else {
-                        println!("❯ {CONTINUE_PROMPT}");
+                        say(
+                            None,
+                            &format!("{} {CONTINUE_PROMPT}", crate::tui::arrow_glyph()),
+                        );
                     }
                     prompt_turn::run_prompt_turn(
                         CONTINUE_PROMPT.to_string(),

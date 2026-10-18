@@ -1,0 +1,69 @@
+name: cli-e2e
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'dist/**'
+      - '.github/workflows/cli-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'dist/**'
+      - '.github/workflows/cli-e2e.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-e2e-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_BUILD_JOBS: 4
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux
+            bin: target/debug/gray
+          - os: macos-latest
+            label: macos
+            bin: target/debug/gray
+          - os: windows-2025
+            label: windows-11
+            bin: target/debug/gray.exe
+          - os: windows-2022
+            label: windows-10
+            bin: target/debug/gray.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build gray CLI
+        run: cargo build --locked -p gray --bin gray
+      - name: Run gray unit tests
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test --locked -p gray
+      - name: Run CLI end-to-end tests
+        env:
+          GRAY_TEST_BIN: ${{ github.workspace }}/${{ matrix.bin }}
+          RUST_BACKTRACE: 1
+        run: python -m unittest discover -s dist/tests -v
+      - name: Smoke check the binary runs
+        run: ${{ matrix.bin }} --version

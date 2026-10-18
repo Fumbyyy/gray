@@ -335,7 +335,11 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
 
     let cache_timer = tui.cache_remaining().map(|left| {
         (
-            format!("\u{25f7} {}", crate::cache::format_remaining(left)),
+            format!(
+                "{} {}",
+                crate::tui::glyph("\u{25f7}", "*"),
+                crate::cache::format_remaining(left)
+            ),
             if left < Duration::from_secs(60) {
                 crate::theme::theme().text_dim
             } else {
@@ -391,7 +395,11 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                         let raw = if ri == 0 {
                             format!("❓ {label} — {desc}")
                         } else {
-                            let marker = if ri == m.cursor { "❯" } else { " " };
+                            let marker = if ri == m.cursor {
+                                crate::tui::arrow_glyph()
+                            } else {
+                                " "
+                            };
                             format!("  {marker} {glyph} {label} — {desc}")
                         };
                         crate::composer::transcript::wrap_styled_line(
@@ -469,7 +477,8 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let footer_y = attach_y + attach_h;
 
         if let Some((started, label)) = &tui.status {
-            let label_text = format!(" ⬡ {label}\u{2026}");
+            let label_text =
+                format!(" {} {label}\u{2026}", crate::tui::glyph("\u{2b21}", "o"));
 
             let elapsed = match compaction_elapsed {
                 Some(d) => d,
@@ -777,13 +786,23 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     "state" => match turn_started.filter(|_| is_task_running) {
                         Some(start) => {
                             let frame = (start.elapsed().as_millis() / 80) as usize % 10;
-                            let spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".chars().nth(frame).unwrap_or('⠋');
+                            let spin = if crate::tui::unicode_safe() {
+                                "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+                                    .chars()
+                                    .nth(frame)
+                                    .unwrap_or('⠋')
+                            } else {
+                                "|/-\\".chars().nth(frame % 4).unwrap_or('|')
+                            };
                             pieces(vec![
                                 (spin.to_string(), muted),
                                 (" working".to_string(), t.text_bright),
                             ])
                         }
-                        None => Seg::new("\u{25cb} idle", muted),
+                        None => Seg::new(
+                            format!("{} idle", crate::tui::glyph("\u{25cb}", "o")),
+                            muted,
+                        ),
                     },
                     "context" if level.get() > 2 => Seg::new(ctx_compact.clone(), muted),
                     "context" => Seg::new(ctx_display.clone(), muted),

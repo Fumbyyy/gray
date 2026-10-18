@@ -29,7 +29,7 @@ fn paste_skill_into_chat(
         t.push_tool_box(header, body);
         let _ = t.draw();
     } else {
-        println!("{expanded}");
+        say(None, expanded);
     }
 }
 
@@ -697,7 +697,10 @@ async fn finish_model_pick(
         t.ensure_gap();
         let _ = t.draw();
     } else if let Some((old, new)) = clamped {
-        println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
+        say(
+            None,
+            &format!("Thinking effort clamped from {old} to {new} (not supported by this model)"),
+        );
     }
     if let Some(m) = config.model.clone()
         && crate::setup::get_user_context_window().is_none()
@@ -722,9 +725,10 @@ pub(crate) async fn handle_model_panes(
 ) -> Option<String> {
     if tui.is_none() {
         match config.model.as_deref() {
-            Some(m) => println!("model {m} — /models provider/id to switch"),
-            None => println!(
-                "no model configured — run /models to set up provider & key (or /models provider/id; /help)"
+            Some(m) => say(None, &format!("model {m} — /models provider/id to switch")),
+            None => say(
+                None,
+                "no model configured — run /models to set up provider & key (or /models provider/id; /help)",
             ),
         }
         return None;
@@ -768,7 +772,7 @@ pub(crate) async fn handle_model_panes(
                 super::cron::push_notice(&mut t, "Model error", &e.to_string(), true);
                 t.ensure_gap();
             } else {
-                println!("model error: {e}");
+                say(None, &format!("model error: {e}"));
             }
         }
     }
@@ -823,10 +827,13 @@ pub(crate) async fn handle_model(
             t.ensure_gap();
             let _ = t.draw();
         } else {
-            println!("✓ Model set to {m}");
+            say(None, &format!("✓ Model set to {m}"));
             if let Some((old, new)) = &applied.clamped {
-                println!(
-                    "Thinking effort clamped from {old} to {new} (not supported by this model)"
+                say(
+                    None,
+                    &format!(
+                        "Thinking effort clamped from {old} to {new} (not supported by this model)"
+                    ),
                 );
             }
         }
@@ -845,12 +852,11 @@ pub(crate) async fn handle_model(
 
     if tui.is_none() {
         match config.model.as_deref() {
-            Some(m) => println!("model {m} — /models provider/id to switch"),
-            None => {
-                println!(
-                    "no model configured — run /models to set up provider & key (or /models provider/id; /help)"
-                )
-            }
+            Some(m) => say(None, &format!("model {m} — /models provider/id to switch")),
+            None => say(
+                None,
+                "no model configured — run /models to set up provider & key (or /models provider/id; /help)",
+            ),
         }
         return;
     }
@@ -891,7 +897,7 @@ pub(crate) async fn handle_model(
                 super::cron::push_notice(&mut t, "Model error", &e.to_string(), true);
                 t.ensure_gap();
             } else {
-                println!("model error: {e}");
+                say(None, &format!("model error: {e}"));
             }
         }
     }

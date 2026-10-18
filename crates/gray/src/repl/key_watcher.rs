@@ -26,7 +26,7 @@ fn subagents_view_args(text: &str) -> Option<Vec<String>> {
     .then_some(args)
 }
 
-fn is_turn_local_command(text: &str) -> bool {
+pub(crate) fn is_turn_local_command(text: &str) -> bool {
     match super::parse_command(text) {
         super::ReplCommand::Usage | super::ReplCommand::Jobs | super::ReplCommand::Help => true,
 
