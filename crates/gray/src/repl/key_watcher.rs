@@ -191,6 +191,7 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                 Some(CommandOutcome::Say(text)) => super::say(tui, &text),
                 Some(CommandOutcome::Prompt(prompt)) => {
                     let mut t = ctx.tui.lock().expect("tui lock");
+                    t.push_user_prompt(&prompt, &[], !prompt.starts_with('/'));
                     t.queued_inputs.push_back((prompt, Vec::new()));
                     let _ = t.draw();
                 }
@@ -220,6 +221,7 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                     // modal surface — rerun through the full dispatch once
                     // the turn ends instead of racing the running turn.
                     let mut t = ctx.tui.lock().expect("tui lock");
+                    t.push_user_prompt(&cmd, &[], false);
                     t.queued_inputs.push_back((cmd.clone(), Vec::new()));
                     let _ = t.draw();
                 }
@@ -376,6 +378,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                 run_turn_local_command(locals, &cmd);
                                 continue;
                             }
+                            t.push_user_prompt(&cmd, &[], false);
                             t.queued_inputs.push_back((cmd, Vec::new()));
                             t.matches.clear();
                             t.sel = 0;
@@ -414,6 +417,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                             let attached: Vec<std::path::PathBuf> =
                                 std::mem::take(&mut t.attachments);
 
+                            t.push_user_prompt(&text, &attached, !text.starts_with('/'));
                             t.queued_inputs.push_back((text, attached));
                             t.textarea.set_text("");
                             t.pending_pastes.clear();

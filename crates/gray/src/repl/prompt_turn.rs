@@ -602,7 +602,9 @@ pub(crate) async fn run_prompt_turn(
             }
             *pending_command = Some(expand_skill_command(parsed, cwd, Some(shared), true));
         } else if let Some((qtext, qimages)) = t.queued_inputs.pop_front() {
-            t.push_user_prompt(&qtext, &qimages, !qtext.starts_with('/'));
+            if t.retract_slash_echo(&qtext) {
+                t.push_user_prompt(&qtext, &qimages, !qtext.starts_with('/'));
+            }
             drop(t);
             let parsed = parse_command(&qtext);
             if parsed.runs_local() {
@@ -663,8 +665,10 @@ fn steer_queued_input(tui: Option<&crate::composer::SharedTui>) -> Option<String
     let mut t = tui?.lock().expect("tui lock");
     let text = take_steerable(&mut t.queued_inputs)?;
 
-    t.push_user_prompt(&text, &[], true);
-    let _ = t.draw();
+    if t.retract_slash_echo(&text) {
+        t.push_user_prompt(&text, &[], true);
+        let _ = t.draw();
+    }
     Some(text)
 }
 
