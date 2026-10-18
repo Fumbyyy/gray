@@ -303,6 +303,7 @@ where
             self.insert_full_screen(rows)?;
         }
         Backend::flush(&mut self.backend)?;
+        crate::quality_of_life::kitty::flush_transmits();
         Ok(())
     }
 

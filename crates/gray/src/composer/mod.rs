@@ -1744,6 +1744,7 @@ impl Tui {
         self.background_closed = true;
         let _ = self.hide_background();
         self.background = None;
+        crate::quality_of_life::kitty::flush_transmits();
 
         self.gap_owed = true;
         self.pay_gap();
@@ -1762,6 +1763,7 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
+        crate::quality_of_life::kitty::flush_transmits();
         let _ = self.hide_background();
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
