@@ -278,6 +278,18 @@ fn rows(range: std::ops::Range<usize>) -> Vec<String> {
     range.map(|i| format!("r{i}")).collect()
 }
 
+fn trimmed(rows: &[String]) -> &[String] {
+    let start = rows
+        .iter()
+        .position(|l| !l.is_empty())
+        .unwrap_or(rows.len());
+    let end = rows
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .map_or(start, |i| i + 1);
+    &rows[start..end]
+}
+
 #[test]
 fn the_band_sits_under_a_short_transcript() {
     let (mut term, tape) = term(16, 0, Scrollback::Regions);
@@ -420,19 +432,22 @@ fn growth_past_the_bottom_scrolls_only_the_overflow() {
 }
 
 #[test]
-fn a_shrink_leaves_its_rows_under_the_footer_for_the_next_insert() {
+fn a_grounded_shrink_leaves_a_gap_that_inserts_fill() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);
     insert(&mut term, &["r0", "r1", "r2", "r3"]);
     band(&mut term, 6);
     band(&mut term, 4);
-    // the band re-grounds, and the transcript slides down with it
+    // the band re-grounds, leaving a two-row gap under the transcript
     assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
     let lines = Screen::replay(&tape, W, 10).lines();
-    assert_eq!(lines[5], "r3", "no blank row between transcript and band");
+    assert_eq!(lines[..4], rows(0..4)[..]);
+    assert!(lines[4..6].iter().all(String::is_empty));
     assert_eq!(lines[6..], band_rows(4)[..]);
-    assert!(lines[..2].iter().all(String::is_empty));
 
     insert(&mut term, &["r4"]);
+    let lines = Screen::replay(&tape, W, 10).lines();
+    assert_eq!(lines[4], "r4");
+    assert!(lines[5].is_empty());
     band(&mut term, 4);
     assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
 
@@ -440,10 +455,35 @@ fn a_shrink_leaves_its_rows_under_the_footer_for_the_next_insert() {
     band(&mut term, 4);
     assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
     let screen = Screen::replay(&tape, W, 10);
-    assert_eq!(screen.scrollback, ["", "", "r0"]);
-    let mut transcript = vec![String::new(), String::new()];
-    transcript.extend(rows(0..7));
-    assert_eq!(screen.transcript(6), transcript);
+    assert_eq!(screen.scrollback, ["r0"]);
+    assert_eq!(screen.transcript(6), rows(0..7));
+}
+
+#[test]
+fn growth_eats_the_gap_before_scrolling_history() {
+    let (mut term, tape) = term(10, 0, Scrollback::Regions);
+    let transcript = rows(0..10);
+    let refs: Vec<&str> = transcript.iter().map(String::as_str).collect();
+    insert(&mut term, &refs);
+    band(&mut term, 4);
+    band(&mut term, 7);
+    band(&mut term, 4);
+    // three blank rows sit between the transcript tail and the band
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
+
+    let mark = tape.len();
+    band(&mut term, 6);
+    assert_eq!(term.viewport_area, Rect::new(0, 4, W, 6));
+    assert!(!tape.since(mark).contains("\r\n"), "history was scrolled");
+    let screen = Screen::replay(&tape, W, 10);
+    assert_eq!(screen.scrollback, rows(0..7));
+
+    band(&mut term, 8);
+    assert_eq!(term.viewport_area, Rect::new(0, 2, W, 8));
+    let screen = Screen::replay(&tape, W, 10);
+    assert_eq!(screen.scrollback, rows(0..8));
+    assert_eq!(screen.transcript(2), transcript);
+    assert!(screen.transcript(2).iter().all(|l| !l.is_empty()));
 }
 
 #[test]
@@ -528,9 +568,15 @@ fn a_popup_on_a_full_screen_regrounds_the_band() {
     assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
     let screen = Screen::replay(&tape, W, 10);
     assert_eq!(screen.scrollback, rows(0..2));
-    assert!(screen.lines()[..2].iter().all(String::is_empty));
-    assert_eq!(screen.lines()[2..6], rows(2..6)[..]);
+    assert_eq!(screen.lines()[..4], rows(2..6)[..]);
+    assert!(screen.lines()[4..6].iter().all(String::is_empty));
     assert_eq!(screen.lines()[6..], band_rows(4)[..]);
+
+    insert(&mut term, &["r6", "r7", "r8"]);
+    band(&mut term, 4);
+    let screen = Screen::replay(&tape, W, 10);
+    assert_eq!(screen.scrollback, rows(0..3));
+    assert_eq!(screen.transcript(6), rows(0..9));
 }
 
 #[test]
@@ -590,19 +636,42 @@ fn a_busy_turn_does_not_tear_the_transcript() {
 
     let screen = Screen::replay(&tape, W, 24);
     let got = screen.transcript(20);
-    for want in &expected {
-        let n = got.iter().filter(|g| *g == want).count();
-        assert_eq!(n, 1, "ghosted transcript row {want:?} appears {n} times");
-    }
-    let mut it = got.iter().peekable();
-    for want in &expected {
-        while it.peek().is_some_and(|g| *g != want) {
-            it.next();
-        }
-        assert!(
-            it.next().is_some_and(|g| g == want),
-            "expected row {want:?} missing from transcript"
-        );
-    }
+    assert_eq!(trimmed(&got), expected.as_slice());
     assert_eq!(screen.lines()[20..], band_rows(4)[..]);
+}
+
+#[test]
+fn a_removed_live_tool_does_not_tear_the_box_below_it() {
+    for scrollback in [Scrollback::Regions, Scrollback::FullScreen] {
+        let (mut term, tape) = term(24, 0, scrollback);
+        let seed = rows(0..30);
+        let refs: Vec<&str> = seed.iter().map(String::as_str).collect();
+        insert(&mut term, &refs);
+        let mut expected = seed.clone();
+        band(&mut term, 6);
+        // a live tool finishes and its rows come out of the band
+        band(&mut term, 4);
+
+        let bx: Vec<String> = (0..10).map(|i| format!("box{i}")).collect();
+        let refs: Vec<&str> = bx.iter().map(String::as_str).collect();
+        insert(&mut term, &refs);
+        expected.extend(bx);
+        band(&mut term, 4);
+
+        let mut n = 30usize;
+        for _ in 0..10 {
+            let chunk = rows(n..n + 4);
+            let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            insert(&mut term, &refs);
+            expected.extend(chunk);
+            n += 4;
+            band(&mut term, 7);
+            band(&mut term, 4);
+        }
+
+        let screen = Screen::replay(&tape, W, 24);
+        let got = screen.transcript(20);
+        assert_eq!(trimmed(&got), expected.as_slice(), "{scrollback:?}");
+        assert_eq!(screen.lines()[20..], band_rows(4)[..], "{scrollback:?}");
+    }
 }
