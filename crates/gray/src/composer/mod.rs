@@ -338,8 +338,6 @@ pub(crate) struct AskModal {
 #[derive(Clone, Debug)]
 pub(crate) struct LiveTool {
     pub(crate) id: String,
-
-    pub(crate) name: String,
     pub(crate) header: Vec<Line<'static>>,
     pub(crate) running: bool,
     pub(crate) tail: LiveToolTail,
@@ -385,9 +383,13 @@ impl LiveToolTail {
     }
 
     fn rows(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.lines.iter().cloned().collect();
+        let mut out: Vec<String> = self
+            .lines
+            .iter()
+            .map(|l| crate::tool_fmt::expand_tabs(l))
+            .collect();
         if !self.carry.trim().is_empty() {
-            out.push(self.carry.clone());
+            out.push(crate::tool_fmt::expand_tabs(&self.carry));
         }
         if out.len() > LIVE_TAIL_LINES {
             out.drain(..out.len() - LIVE_TAIL_LINES);
@@ -746,7 +748,6 @@ fn intro_stage(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) -> Opt
         w as u16,
         (h - start) as u16,
     ));
-    terminal.reset_gap();
 
     for _ in 0..64 {
         match crossterm::event::poll(Duration::ZERO) {
@@ -1161,6 +1162,12 @@ impl Tui {
         true
     }
 
+    pub(crate) fn start_fresh_conversation(&mut self) {
+        self.history_entries = vec![TranscriptEntry::Welcome];
+        self.left_home = false;
+        self.reflow_on_resize(self.last_width);
+    }
+
     pub fn set_model(&mut self, model: String) {
         self.model_name = model;
     }
@@ -1291,20 +1298,13 @@ impl Tui {
         self.turn_billed_output = Some(output_tokens);
     }
 
-    pub(crate) fn upsert_live_tool(
-        &mut self,
-        id: &str,
-        name: &str,
-        header: Vec<Line<'static>>,
-        running: bool,
-    ) {
+    pub(crate) fn upsert_live_tool(&mut self, id: &str, header: Vec<Line<'static>>, running: bool) {
         if let Some(slot) = self.live_tools.iter_mut().find(|t| t.id == id) {
             slot.header = header;
             slot.running = running;
         } else {
             self.live_tools.push(LiveTool {
                 id: id.to_string(),
-                name: name.to_string(),
                 header,
                 running,
                 tail: LiveToolTail::default(),
@@ -1812,5 +1812,9 @@ mod compaction_tests;
 #[path = "mod_palette_tests.rs"]
 #[cfg(test)]
 mod palette_tests;
+
+#[path = "mod_fresh_conversation_tests.rs"]
+#[cfg(test)]
+mod fresh_conversation_tests;
 
 mod background;

@@ -134,13 +134,25 @@ pub(crate) fn wrap_styled_line_with_ranges(
         None
     };
 
+    // A leading whitespace run ("  " on host notices, diff indents, ...) is
+    // kept on the first row and re-applied as a same-width pad on every
+    // continuation row. The " | " gutter path handles its own prefix, so the
+    // lead only applies when there is no gutter.
+    let lead_end = if gutter_info.is_none() {
+        flat.len() - flat.trim_start().len()
+    } else {
+        0
+    };
+    let lead_w = crate::tui::visible_width(&flat[..lead_end]);
+    let lead_style = span_bounds.first().map(|(_, s)| *s).unwrap_or(line.style);
+
     let (content_start, cont_gutter_str, gutter_style, eff_max_w) =
         if let Some((g_end, ref c_str, g_style)) = gutter_info {
             let g_width = crate::tui::visible_width(&flat[..g_end]);
             let avail = max_w.saturating_sub(g_width).max(10);
             (g_end, Some(c_str.clone()), Some(g_style), avail)
         } else {
-            (0, None, None, max_w)
+            (0, None, None, max_w.saturating_sub(lead_w).max(10))
         };
 
     let mut words: Vec<Range<usize>> = Vec::new();
@@ -223,6 +235,8 @@ pub(crate) fn wrap_styled_line_with_ranges(
     let mut result: Vec<(Line<'static>, Range<usize>)> = Vec::new();
     for (row_idx, r) in out_ranges.into_iter().enumerate() {
         let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut slice_range = r.clone();
+        let mut out_range = r.clone();
         if let (Some(c_str), Some(g_style)) = (&cont_gutter_str, gutter_style) {
             if row_idx == 0 {
                 let g_sliced = slice_line_spans(&line, &span_bounds, &(0..content_start));
@@ -235,8 +249,19 @@ pub(crate) fn wrap_styled_line_with_ranges(
             } else {
                 spans.push(Span::styled(c_str.clone(), g_style.patch(line.style)));
             }
+        } else if lead_end > 0 {
+            if row_idx == 0 {
+                slice_range = 0..r.end;
+                out_range = 0..r.end;
+            } else {
+                spans.push(Span::styled(
+                    " ".repeat(lead_w),
+                    lead_style.patch(line.style),
+                ));
+                out_range = (r.start - lead_end)..r.end;
+            }
         }
-        let sliced = slice_line_spans(&line, &span_bounds, &r);
+        let sliced = slice_line_spans(&line, &span_bounds, &slice_range);
         for s in sliced.spans {
             spans.push(Span::styled(
                 s.content.into_owned(),
@@ -245,7 +270,7 @@ pub(crate) fn wrap_styled_line_with_ranges(
         }
         let mut new_line = Line::from(spans).style(line.style);
         new_line.alignment = line.alignment;
-        result.push((new_line, r));
+        result.push((new_line, out_range));
     }
     if result.is_empty() {
         result.push((Line::from("").style(line.style), 0..0));
@@ -420,15 +445,15 @@ pub(crate) fn format_user_prompt_lines(
             }
         }
     }
-    let mut previews = false;
-    for path in attached {
-        if let Some(rows) = image_preview_lines(path, max_w) {
-            if !previews && !lines.is_empty() {
-                lines.push(margin_row());
-            }
-            previews = true;
-            lines.extend(rows);
+    let previews = attached
+        .iter()
+        .filter_map(|path| image_preview_lines(path, max_w))
+        .collect();
+    for band in tile_previews(previews, max_w) {
+        if !lines.is_empty() {
+            lines.push(margin_row());
         }
+        lines.extend(band);
     }
     lines.insert(0, margin_row());
     lines.push(margin_row());
@@ -467,7 +492,7 @@ pub(crate) fn viewed_image_lines(
         return None;
     };
     let raw_paths = collected.into_iter().take(MAX_PREVIEWS);
-    let mut lines = Vec::new();
+    let mut previews = Vec::new();
     for raw in raw_paths {
         let path = std::path::Path::new(&raw);
         let path = if path.is_absolute() {
@@ -479,14 +504,72 @@ pub(crate) fn viewed_image_lines(
         if !is_image {
             continue;
         }
-        if let Some(rows) = image_preview_lines(&path, max_w) {
-            if !lines.is_empty() {
-                lines.push(Line::default());
-            }
-            lines.extend(rows);
+        previews.extend(image_preview_lines(&path, max_w));
+    }
+    let mut lines = Vec::new();
+    for band in tile_previews(previews, max_w) {
+        if !lines.is_empty() {
+            lines.push(Line::default());
         }
+        lines.extend(band);
     }
     (!lines.is_empty()).then_some(lines)
+}
+
+const PREVIEW_GAP: usize = 2;
+
+/// Lay image previews out left to right, `PREVIEW_GAP` cells apart, starting
+/// a new band when the next one would pass `max_w`. Each preview row is an
+/// indent span followed by one span per cell, so a row's width is its span
+/// count minus one; shorter previews are padded with blank cells.
+fn tile_previews(previews: Vec<Vec<Line<'static>>>, max_w: usize) -> Vec<Vec<Line<'static>>> {
+    let surface = Style::default().bg(crate::theme::theme().surface_bg);
+    let blank = |n: usize| Span::styled(" ".repeat(n), surface);
+    let mut bands: Vec<Vec<(usize, Vec<Line<'static>>)>> = Vec::new();
+    let mut used = 0;
+    for p in previews {
+        let w = p
+            .iter()
+            .map(|l| l.spans.len().saturating_sub(1))
+            .max()
+            .unwrap_or(0);
+        match bands.last_mut() {
+            Some(band) if used + PREVIEW_GAP + w <= max_w => {
+                used += PREVIEW_GAP + w;
+                band.push((w, p));
+            }
+            _ => {
+                used = w;
+                bands.push(vec![(w, p)]);
+            }
+        }
+    }
+    bands
+        .into_iter()
+        .map(|band| {
+            let height = band.iter().map(|(_, p)| p.len()).max().unwrap_or(0);
+            (0..height)
+                .map(|y| {
+                    let mut spans = vec![blank(GUTTER + 2)];
+                    for (i, (w, p)) in band.iter().enumerate() {
+                        if i > 0 {
+                            spans.push(blank(PREVIEW_GAP));
+                        }
+                        let cells: Vec<Span<'static>> = p
+                            .get(y)
+                            .map(|l| l.spans.iter().skip(1).cloned().collect())
+                            .unwrap_or_default();
+                        let pad = w.saturating_sub(cells.len());
+                        spans.extend(cells);
+                        if pad > 0 {
+                            spans.push(blank(pad));
+                        }
+                    }
+                    Line::from(spans)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn image_preview_lines(path: &std::path::Path, max_w: usize) -> Option<Vec<Line<'static>>> {

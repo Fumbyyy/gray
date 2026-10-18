@@ -1,142 +1,5 @@
 use std::path::Path;
 
-use crate::setup::{ManagerItem, ManagerOutcome, ManagerSpec, run_install_manager};
-
-pub(crate) fn format_cron_dashboard(
-    jobs: &[crate::cron::CronJob],
-    health: Option<&crate::cron::CronHealth>,
-    now: i64,
-) -> String {
-    if jobs.is_empty() {
-        return "no cron jobs — `gray cron add \"every 1h\" \"prompt\"` to create one".to_string();
-    }
-    let mut out = String::new();
-    for j in jobs {
-        out.push_str(&format!(
-            "• {} ({}) — {:?} — next {} — last {}\n",
-            j.name,
-            &j.id[..8.min(j.id.len())],
-            j.schedule,
-            j.next_run_at
-                .map(|t| t.to_string())
-                .as_deref()
-                .unwrap_or("-"),
-            j.last_status
-                .map(|s| format!("{s:?}"))
-                .as_deref()
-                .unwrap_or("-"),
-        ));
-    }
-    match health {
-        Some(h) => out.push_str(&crate::cron_status::ticker_line(h, now)),
-        None => out.push_str("due jobs fire automatically in this session"),
-    }
-    out
-}
-
-const CRON_SPEC: ManagerSpec = ManagerSpec {
-    title: "Cron",
-    empty_hint: "no cron jobs \u{2014} gray cron add \"every 1h\" \"prompt\"",
-    error_verb: "cron action failed",
-    supports_toggle: true,
-    enter_invokes: false,
-    supports_remove: true,
-    errors_tab: false,
-    keep_stale_on_relist_error: false,
-};
-
-pub(crate) fn items(
-    jobs: &[crate::cron::CronJob],
-    health: Option<&crate::cron::CronHealth>,
-    now: i64,
-) -> Vec<ManagerItem> {
-    let mut out: Vec<ManagerItem> = jobs
-        .iter()
-        .map(|j| {
-            let (glyph, tag, lit, toggleable) = match j.state {
-                crate::cron::store::JobState::Active if j.enabled => ("\u{2713}", "", true, true),
-                crate::cron::store::JobState::Active => ("\u{25cb}", " [disabled]", false, false),
-                crate::cron::store::JobState::Paused => ("\u{25cb}", " [paused]", false, true),
-                crate::cron::store::JobState::Done => ("\u{b7}", " [done]", false, false),
-            };
-            let next = j
-                .next_run_at
-                .map(|t| t.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let last = j
-                .last_status
-                .map(|s| format!("{s:?}"))
-                .unwrap_or_else(|| "-".to_string());
-            let row = format!(
-                "{glyph} {} ({}) \u{2014} {} \u{2014} next {} \u{2014} last {}{tag}",
-                j.name,
-                &j.id[..8.min(j.id.len())],
-                crate::cron_tool::schedule_text(&j.schedule),
-                next,
-                last,
-            );
-            ManagerItem {
-                name: j.id.clone(),
-                row,
-                lit,
-                enabled: toggleable && j.state == crate::cron::store::JobState::Active,
-                read_only: !toggleable,
-                needs_setup: false,
-            }
-        })
-        .collect();
-
-    if !jobs.is_empty()
-        && let Some(h) = health
-    {
-        out.push(ManagerItem {
-            name: String::new(),
-            row: crate::cron_status::ticker_line(h, now),
-            lit: true,
-            enabled: false,
-            read_only: true,
-            needs_setup: false,
-        });
-    }
-    out
-}
-
-pub(crate) fn run_cron_modal(
-    bg: Option<&crate::setup::BackgroundSnapshot>,
-    home: &Path,
-) -> anyhow::Result<bool> {
-    run_install_manager(
-        bg,
-        None,
-        &CRON_SPEC,
-        || {
-            let store = crate::cron::CronStore::open(home.join("cron")).ok()?;
-            let jobs = store.list().ok()?;
-            let now = crate::cron::now_secs();
-            let health = store.health(now).ok();
-            Some(items(&jobs, health.as_ref(), now))
-        },
-        |id| {
-            let store = crate::cron::CronStore::open(home.join("cron"))?;
-            anyhow::ensure!(
-                store.remove(id)?,
-                "unknown cron job {id:?} \u{2014} it may have been removed"
-            );
-            Ok(())
-        },
-        |id, on| {
-            let store = crate::cron::CronStore::open(home.join("cron"))?;
-            let known = store.set_paused(id, !on)?;
-            anyhow::ensure!(
-                known,
-                "unknown cron job {id:?} \u{2014} it may have been removed"
-            );
-            Ok(())
-        },
-    )
-    .map(ManagerOutcome::into_changed)
-}
-
 fn idle_ctx(cwd: &Path, sid: &str) -> gray_core::agent::ToolContext {
     gray_core::agent::ToolContext {
         cwd: cwd.to_path_buf(),
@@ -147,7 +10,7 @@ fn idle_ctx(cwd: &Path, sid: &str) -> gray_core::agent::ToolContext {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WakeCard {
-    Cron(crate::cron_serve::CronCard),
+    Cron(crate::session_mailbox::CronCard),
 
     Job(JobCard),
 
@@ -256,8 +119,25 @@ pub(super) fn job_card_lines(
     (Line::from(spans), body)
 }
 
+pub(crate) fn format_delivery_plain(
+    name: &str,
+    body: &str,
+    reminder: bool,
+    failed: bool,
+) -> String {
+    if reminder && !failed {
+        return body.to_string();
+    }
+    let title = if failed {
+        format!("{name} failed")
+    } else {
+        name.to_string()
+    };
+    format!("{title}\n\n{}", body.trim())
+}
+
 pub(super) fn cron_card_lines(
-    card: &crate::cron_serve::CronCard,
+    card: &crate::session_mailbox::CronCard,
     width: usize,
 ) -> (
     ratatui::text::Line<'static>,
@@ -327,7 +207,7 @@ pub(crate) fn idle_wake(
     let mut prompts = Vec::new();
     let mut sends = Vec::new();
     if let Ok(home) = crate::setup::gray_home() {
-        for d in crate::cron_serve::drain_session_inbox(&home, sid) {
+        for d in crate::session_mailbox::drain_session_inbox(&home, sid) {
             cards.push(match d.cron {
                 Some(c) => WakeCard::Cron(c),
                 None => WakeCard::Text(d.card),
@@ -387,6 +267,6 @@ async fn wait_then_wake(
     }
 }
 
-#[path = "cron_tests.rs"]
+#[path = "notice_tests.rs"]
 #[cfg(test)]
 mod tests;

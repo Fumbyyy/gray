@@ -389,16 +389,10 @@ pub(crate) fn subscription_rows(limits: &gray_plugin::ProviderUsageLimits) -> Ve
     rows
 }
 
-pub(crate) struct UsagePage {
-    pub(crate) tab: &'static str,
-    pub(crate) title: String,
-    pub(crate) lines: Vec<Line<'static>>,
-}
-
 pub(crate) fn usage_pages(
     input: &PanelInput<'_>,
     subs: &[(String, gray_plugin::ProviderUsageLimits)],
-) -> Vec<UsagePage> {
+) -> Vec<super::pager::PagerPage> {
     let mut pages = Vec::new();
     if !subs.is_empty() {
         let mut lines = Vec::new();
@@ -417,8 +411,8 @@ pub(crate) fn usage_pages(
             )));
             lines.extend(subscription_rows(limits));
         }
-        pages.push(UsagePage {
-            tab: "Usage",
+        pages.push(super::pager::PagerPage {
+            tab: "Usage".into(),
             title: "Usage".into(),
             lines,
         });
@@ -430,171 +424,13 @@ pub(crate) fn usage_pages(
             true,
         ))];
         lines.extend(usage_rows(input));
-        pages.push(UsagePage {
-            tab: "Session",
+        pages.push(super::pager::PagerPage {
+            tab: "Session".into(),
             title: "Session usage".into(),
             lines,
         });
     }
     pages
-}
-
-pub(crate) fn run_usage_modal(
-    rebuild: &mut dyn FnMut() -> Vec<UsagePage>,
-    bg: &crate::setup::BackgroundSnapshot,
-) -> anyhow::Result<()> {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
-    use ratatui::layout::Rect;
-    use ratatui::widgets::{Block, Clear, Paragraph};
-    use std::time::Duration;
-
-    let (_session, mut terminal) = crate::setup::open_modal()?;
-    let t = crate::theme::theme();
-    let (box_bg, accent, text_dim, on_sel) = (t.surface_bg, t.accent, t.text_dim, t.on_selection);
-    let mut pages = rebuild();
-    let mut page = 0usize;
-    let mut scroll = 0usize;
-
-    let out: anyhow::Result<()> = (|| {
-        if pages.is_empty() {
-            return Ok(());
-        }
-        loop {
-            page = page.min(pages.len().saturating_sub(1));
-            terminal.draw(|frame| {
-                let area = frame.area();
-                if area.width < 30 || area.height < 8 {
-                    return;
-                }
-                crate::setup::render_dimmed_background(frame, bg);
-                let modal_w = 88.min(area.width.saturating_sub(2)).max(40).min(area.width);
-                let modal_h = ((pages[page].lines.len() as u16) + 4)
-                    .min(area.height.saturating_sub(2))
-                    .max(8)
-                    .min(area.height);
-                let modal_rect = Rect::new(
-                    (area.width.saturating_sub(modal_w)) / 2,
-                    (area.height.saturating_sub(modal_h)) / 4,
-                    modal_w,
-                    modal_h,
-                );
-                frame.render_widget(Clear, modal_rect);
-                frame.render_widget(
-                    Block::default().style(Style::default().bg(box_bg)),
-                    modal_rect,
-                );
-                let inner = Rect::new(
-                    modal_rect.x + 2,
-                    modal_rect.y + 1,
-                    modal_w.saturating_sub(4),
-                    modal_h.saturating_sub(2),
-                );
-                let mut put = |y: u16, line: Line| {
-                    frame.render_widget(
-                        Paragraph::new(line).style(Style::default().bg(box_bg)),
-                        Rect::new(inner.x, inner.y + y, inner.width, 1),
-                    );
-                };
-
-                let mut tabs: Vec<Span> = Vec::new();
-                for (i, p) in pages.iter().enumerate() {
-                    if i > 0 {
-                        tabs.push(Span::styled("  ", Style::default().bg(box_bg)));
-                    }
-                    tabs.push(Span::styled(
-                        format!(" {} ", p.tab),
-                        if i == page {
-                            Style::default()
-                                .fg(on_sel)
-                                .bg(accent)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(text_dim).bg(box_bg)
-                        },
-                    ));
-                }
-                let tabs_w: usize = tabs.iter().map(|s| s.content.chars().count()).sum();
-                tabs.push(Span::styled(
-                    " ".repeat((inner.width as usize).saturating_sub(tabs_w + 3)),
-                    Style::default().bg(box_bg),
-                ));
-                tabs.push(Span::styled(
-                    "esc",
-                    Style::default().fg(text_dim).bg(box_bg),
-                ));
-                put(0, Line::from(tabs));
-
-                let body_h = inner.height.saturating_sub(3) as usize;
-                scroll = scroll.min(pages[page].lines.len().saturating_sub(body_h));
-                for (i, line) in pages[page]
-                    .lines
-                    .iter()
-                    .skip(scroll)
-                    .take(body_h)
-                    .enumerate()
-                {
-                    put(2 + i as u16, line.clone());
-                }
-
-                let footer = if pages.len() > 1 {
-                    " ←/→ page · ↑↓ scroll · r refresh · esc close"
-                } else {
-                    " ↑↓ scroll · r refresh · esc close"
-                };
-                put(
-                    inner.height.saturating_sub(1),
-                    Line::from(Span::styled(
-                        footer,
-                        Style::default().fg(text_dim).bg(box_bg),
-                    )),
-                );
-            })?;
-
-            if crate::composer::input::stdin_gone() {
-                return Ok(());
-            }
-            if !poll(Duration::from_millis(250))? {
-                continue;
-            }
-            let Event::Key(KeyEvent {
-                code,
-                modifiers,
-                kind,
-                ..
-            }) = read()?
-            else {
-                continue;
-            };
-            if kind == KeyEventKind::Release {
-                continue;
-            }
-            match code {
-                KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
-                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(());
-                }
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
-                    page = (page + 1) % pages.len();
-                    scroll = 0;
-                }
-                KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
-                    page = (page + pages.len() - 1) % pages.len();
-                    scroll = 0;
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    scroll = scroll.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    scroll += 1;
-                }
-                KeyCode::Char('r') => {
-                    pages = rebuild();
-                }
-                _ => {}
-            }
-        }
-    })();
-    out
 }
 
 #[path = "usage_panel_tests.rs"]

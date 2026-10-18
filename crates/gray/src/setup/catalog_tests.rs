@@ -284,27 +284,21 @@ fn removing_entry_keeps_every_other_credential() {
 fn subsystem_switches_default_on_and_only_explicit_false_turns_them_off() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.json");
-    for at in [
-        crate::setup::cron_auto_enabled_at as fn(&std::path::Path) -> bool,
-        crate::setup::gw_auto_enabled_at,
-    ] {
-        assert!(at(&cfg), "missing config reads as enabled");
-    }
+    assert!(
+        crate::setup::gw_auto_enabled_at(&cfg),
+        "missing config reads as enabled"
+    );
     let mut saved = crate::setup::load_saved_config_at(&cfg);
     saved.memory_auto = Some(false);
     saved.cron_auto = Some(false);
     saved.gw_auto = Some(false);
     crate::setup::save_saved_config_at(&cfg, &saved).unwrap();
-    assert!(!crate::setup::cron_auto_enabled_at(&cfg));
     assert!(!crate::setup::gw_auto_enabled_at(&cfg));
 
     let reloaded = crate::setup::load_saved_config_at(&cfg);
     assert_eq!(reloaded.memory_auto, Some(false));
     assert_eq!(reloaded.cron_auto, Some(false));
     assert_eq!(reloaded.gw_auto, Some(false));
-
-    std::fs::write(&cfg, r#"{"cron_auto":"yes"}"#).unwrap();
-    assert!(crate::setup::cron_auto_enabled_at(&cfg));
 }
 
 #[test]

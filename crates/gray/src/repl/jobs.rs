@@ -21,7 +21,7 @@ pub(crate) fn session_wakes(jobs: &[crate::cron::CronJob], sid: &str) -> Vec<Wak
                 && j.state == crate::cron::store::JobState::Active
                 && matches!(j.deliver, crate::cron::Deliver::Origin)
                 && j.origin.as_ref().is_some_and(|o| {
-                    o.platform == crate::cron_serve::SESSION_PLATFORM && o.chat == sid
+                    o.platform == crate::session_mailbox::SESSION_PLATFORM && o.chat == sid
                 })
         })
         .filter_map(|j| {

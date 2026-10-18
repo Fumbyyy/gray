@@ -12,7 +12,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, timeout};
 
-use gray_core::agent::{CommandOutcome, InputSubmit, Tool, ToolContext, ToolOutput};
+use gray_core::agent::{
+    CommandOutcome, InputSubmit, PanelSpec, PickerSpec, Tool, ToolContext, ToolOutput,
+};
 use gray_core::credential::CredentialMaterial;
 use gray_core::message::{Message, ToolDef};
 
@@ -383,6 +385,20 @@ fn spawn_reader(
     });
 }
 
+fn short_exit_status(status: &std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exit {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return format!("signal {sig}");
+        }
+    }
+    "terminated".to_string()
+}
+
 impl Transport {
     fn name_of(argv: &[String]) -> String {
         argv.first()
@@ -428,13 +444,17 @@ impl Transport {
 
     async fn ensure_alive(&self) -> bool {
         let mut child = self.child.lock().await;
-        let status = match child.try_wait() {
+        let (status, clean, wait_err) = match child.try_wait() {
             Ok(None) => return true,
-            Ok(Some(s)) => s.to_string(),
-            Err(e) => e.to_string(),
+            Ok(Some(s)) => (short_exit_status(&s), s.success(), None),
+            Err(e) => ("unknown".to_string(), false, Some(e.to_string())),
         };
         let name = Self::name_of(&self.argv);
-        log::warn!(target: "gray_plugin", "sidecar child exited, respawning");
+        if clean {
+            log::info!(target: "gray_plugin", "sidecar {name} exited cleanly, respawning");
+        } else {
+            log::warn!(target: "gray_plugin", "sidecar {name} exited ({status}), respawning");
+        }
         match spawn_child(&self.argv) {
             Ok((new_child, stdin, stdout)) => {
                 *child = new_child;
@@ -453,26 +473,46 @@ impl Transport {
                     Self::name_of(&self.argv),
                     p.epoch,
                 );
-                self.say(format!(
-                    "plugin {name} exited ({status}) — restarted; see ~/.gray/logs/sidecar-stderr.log"
-                ))
-                .await;
+                if !clean {
+                    self.say(&name, &status, true, wait_err).await;
+                }
                 true
             }
             Err(e) => {
                 log::warn!(target: "gray_plugin", "sidecar respawn failed: {e}");
-                self.say(format!(
-                    "plugin {name} exited ({status}) and could not be restarted: {e}; see ~/.gray/logs/sidecar-stderr.log"
-                ))
-                .await;
+                let error = Some(format!("{e}"));
+                self.say(&name, &status, false, error).await;
                 false
             }
         }
     }
 
-    async fn say(&self, text: String) {
+    async fn say(&self, plugin: &str, status: &str, restarted: bool, error: Option<String>) {
+        let text = if restarted {
+            format!(
+                "plugin {plugin} exited ({status}) — restarted; see ~/.gray/logs/sidecar-stderr.log"
+            )
+        } else {
+            let why = error
+                .as_deref()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default();
+            format!(
+                "plugin {plugin} exited ({status}) and could not be restarted{why}; see ~/.gray/logs/sidecar-stderr.log"
+            )
+        };
+        let mut params = json!({
+            "text": text,
+            "kind": "plugin_crash",
+            "plugin": plugin,
+            "status": status,
+            "restarted": restarted,
+        });
+        if let Some(e) = error {
+            params["error"] = json!(e);
+        }
         if let Some(h) = self.host_handler.lock().await.clone() {
-            let _ = h(HOST_SAY.to_string(), json!({"text": text})).await;
+            let _ = h(HOST_SAY.to_string(), params).await;
         }
     }
 
@@ -1543,6 +1583,24 @@ pub(crate) fn command_outcome(v: &Value) -> Option<CommandOutcome> {
     }
     if let Some(p) = field("prompt") {
         return Some(CommandOutcome::Prompt(p.to_string()));
+    }
+    if let Some(spec) = v.get("panel") {
+        return Some(match serde_json::from_value::<PanelSpec>(spec.clone()) {
+            Ok(spec) => CommandOutcome::Panel(spec),
+            Err(e) => match field("text") {
+                Some(t) => CommandOutcome::Say(t.to_string()),
+                None => CommandOutcome::Say(format!("invalid panel result: {e}")),
+            },
+        });
+    }
+    if let Some(spec) = v.get("picker") {
+        return Some(match serde_json::from_value::<PickerSpec>(spec.clone()) {
+            Ok(spec) => CommandOutcome::Picker(spec),
+            Err(e) => match field("text") {
+                Some(t) => CommandOutcome::Say(t.to_string()),
+                None => CommandOutcome::Say(format!("invalid picker result: {e}")),
+            },
+        });
     }
     field("text").map(|t| CommandOutcome::Say(t.to_string()))
 }

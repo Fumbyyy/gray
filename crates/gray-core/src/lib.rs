@@ -20,8 +20,9 @@ pub mod squeeze;
 pub mod tool_out;
 
 pub use agent::{
-    Agent, CommandOutcome, PluginCommand, PluginHooks, Provider, ProviderError, ProviderStream,
-    ToolBefore, ToolContext, ToolExecutor, ToolOutput,
+    Agent, CommandOutcome, PanelPage, PanelSpan, PanelSpec, PanelStyle, PickerItem, PickerSpec,
+    PluginCommand, PluginHooks, Provider, ProviderError, ProviderStream, ToolBefore, ToolContext,
+    ToolExecutor, ToolOutput,
 };
 pub use compact::price_cliff_ceiling;
 pub use error::{CoreError, Result};

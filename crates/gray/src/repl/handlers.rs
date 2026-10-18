@@ -119,7 +119,6 @@ pub(crate) fn apply_skill_toggle(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Subsystem {
-    Cron,
     Gateway,
     Intro,
 }
@@ -127,7 +126,6 @@ pub(crate) enum Subsystem {
 impl Subsystem {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Subsystem::Cron => "cron",
             Subsystem::Gateway => "gateway",
             Subsystem::Intro => "intro",
         }
@@ -135,11 +133,6 @@ impl Subsystem {
 
     fn copy(self) -> (&'static str, &'static str, &'static str) {
         match self {
-            Subsystem::Cron => (
-                "cron on — scheduled jobs will fire",
-                "scheduled jobs won't fire",
-                "/cron still runs them",
-            ),
             Subsystem::Gateway => (
                 "gateway on",
                 "run/start will refuse to start",
@@ -155,7 +148,6 @@ impl Subsystem {
 
     fn field(self, saved: &mut crate::setup::SavedConfig) -> &mut Option<bool> {
         match self {
-            Subsystem::Cron => &mut saved.cron_auto,
             Subsystem::Gateway => &mut saved.gw_auto,
             Subsystem::Intro => &mut saved.intro,
         }
@@ -702,7 +694,7 @@ async fn finish_model_pick(
             t.set_hide_thinking(*hide_thinking);
         }
         if let Some((old, new)) = clamped {
-            super::cron::push_notice(
+            super::notice::push_notice(
                 &mut t,
                 "Thinking effort clamped",
                 &format!("from {old} to {new} (not supported by this model)"),
@@ -784,7 +776,7 @@ pub(crate) async fn handle_model_panes(
         Err(e) => {
             if let Some(shared) = tui {
                 let mut t = shared.lock().expect("tui lock");
-                super::cron::push_notice(&mut t, "Model error", &e.to_string(), true);
+                super::notice::push_notice(&mut t, "Model error", &e.to_string(), true);
                 t.ensure_gap();
             } else {
                 say(None, &format!("model error: {e}"));
@@ -832,7 +824,7 @@ pub(crate) async fn handle_model(
             }
             t.push_action("Model set to", Some(&m));
             if let Some((old, new)) = &applied.clamped {
-                super::cron::push_notice(
+                super::notice::push_notice(
                     &mut t,
                     "Thinking effort clamped",
                     &format!("from {old} to {new} (not supported by this model)"),
@@ -909,7 +901,7 @@ pub(crate) async fn handle_model(
         Err(e) => {
             if let Some(shared) = tui {
                 let mut t = shared.lock().expect("tui lock");
-                super::cron::push_notice(&mut t, "Model error", &e.to_string(), true);
+                super::notice::push_notice(&mut t, "Model error", &e.to_string(), true);
                 t.ensure_gap();
             } else {
                 say(None, &format!("model error: {e}"));

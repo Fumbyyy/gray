@@ -558,6 +558,53 @@ fn user_prompt_renders_attachment_markers_as_chips() {
 }
 
 #[test]
+fn user_prompt_tiles_attached_images_side_by_side() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let red = ratatui::style::Color::Rgb(255, 0, 0);
+    let green = ratatui::style::Color::Rgb(0, 255, 0);
+    let paths: Vec<std::path::PathBuf> = [("a.png", [255, 0, 0, 255]), ("b.png", [0, 255, 0, 255])]
+        .into_iter()
+        .map(|(name, px)| {
+            let p = dir.path().join(name);
+            ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba(px))
+                .save(&p)
+                .expect("write png");
+            p
+        })
+        .collect();
+    let has = |l: &Line<'static>, c| l.spans.iter().any(|s| s.style.fg == Some(c));
+
+    let wide = format_user_prompt_lines("look", &paths, 200);
+    assert!(
+        wide.iter().any(|l| has(l, red) && has(l, green)),
+        "both previews share a row when they fit"
+    );
+    let row = wide.iter().find(|l| has(l, red) && has(l, green)).unwrap();
+    let first_green = row
+        .spans
+        .iter()
+        .position(|s| s.style.fg == Some(green))
+        .unwrap();
+    assert_eq!(
+        row.spans[first_green - 1].content.as_ref(),
+        "  ",
+        "gap between previews"
+    );
+
+    let narrow = format_user_prompt_lines("look", &paths, 40);
+    assert!(
+        !narrow.iter().any(|l| has(l, red) && has(l, green)),
+        "too wide to share a row"
+    );
+    let last_red = narrow.iter().rposition(|l| has(l, red)).unwrap();
+    let first_green = narrow.iter().position(|l| has(l, green)).unwrap();
+    assert!(
+        first_green > last_red + 1,
+        "a blank row separates stacked bands"
+    );
+}
+
+#[test]
 fn viewed_image_lines_preview_read_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     let img = dir.path().join("slide.png");
@@ -628,4 +675,23 @@ fn split_synthetic_prompt_parts_notifications() {
             "Background job c finished (exit 0) after 3s".to_string(),
         ]
     );
+}
+
+#[test]
+fn wrapped_rows_keep_the_leading_indent() {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let text =
+        "  plugin gray-gateway exited (exit 1) — restarted; see ~/.gray/logs/sidecar-stderr.log"
+            .to_string();
+    for max_w in [24usize, 40, 60] {
+        let rows = wrap_styled_line(Line::from(Span::styled(text.clone(), dim)), max_w);
+        assert!(rows.len() > 1, "expected a wrap at width {max_w}");
+        for row in &rows {
+            let row_text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                row_text.starts_with("  "),
+                "wrapped row lost its leading indent at width {max_w}: {row_text:?}"
+            );
+        }
+    }
 }

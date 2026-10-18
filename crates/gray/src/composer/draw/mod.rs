@@ -724,6 +724,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         if !home_mode {
             let (max_tokens, max_label) = crate::setup::model_context_info(&tui.model_name);
 
+            let has_usage = tui.latest_usage.or(tui.cumulative_usage).is_some();
             let (used_tokens, hit_rate) = if let Some(u) = tui.latest_usage.or(tui.cumulative_usage)
             {
                 (
@@ -802,6 +803,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     },
                     "context" if level.get() > 2 => Seg::new(ctx_compact.clone(), muted),
                     "context" => Seg::new(ctx_display.clone(), muted),
+                    "cache" if !has_usage => Seg::new("", muted),
                     "cache" => Seg::new(cache_display.clone(), cache_color),
                     "timer" => cache_timer
                         .as_ref()
@@ -811,27 +813,14 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     "model" => {
                         let mut seg = Seg::new(model_text.clone(), t.text_bright);
                         if let Some(parts) = &tui.model_label_parts {
-                            let sk_lit = tui
-                                .live_tools
-                                .iter()
-                                .any(|tl| tl.running && tl.name.contains("handoff"));
-                            let lit = if sk_lit {
-                                Some(1)
-                            } else if tui.turn_started.is_some() {
-                                Some(0)
-                            } else {
-                                None
-                            };
                             seg.parts = Some(
                                 parts
                                     .iter()
                                     .map(|(txt, slot)| {
-                                        let c = match slot {
-                                            Some(_) if *slot == lit => t.accent,
-                                            Some(_) => t.text_bright,
-                                            None => muted,
-                                        };
-                                        (txt.clone(), c)
+                                        (
+                                            txt.clone(),
+                                            if slot.is_some() { t.text_bright } else { muted },
+                                        )
                                     })
                                     .collect(),
                             );

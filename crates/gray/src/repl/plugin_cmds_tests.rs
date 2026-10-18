@@ -121,6 +121,7 @@ async fn background_off_dispatches_without_provider_or_prompt() {
             vec![PluginCommand {
                 name: "/background".into(),
                 description: "background".into(),
+                turn_local_verbs: Vec::new(),
             }]
         }
         async fn run_command(&self, name: &str, argv: Vec<String>) -> Option<CommandOutcome> {

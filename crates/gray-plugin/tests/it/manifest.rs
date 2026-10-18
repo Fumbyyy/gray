@@ -126,3 +126,62 @@ fn tool_label_parses_and_stays_model_invisible() {
             .contains_key("label")
     );
 }
+
+struct ManifestPlugin(Manifest);
+
+#[async_trait::async_trait]
+impl gray_plugin::Plugin for ManifestPlugin {
+    fn manifest(&self) -> Manifest {
+        self.0.clone()
+    }
+}
+
+#[test]
+fn turn_local_parses_and_stays_within_declared_commands() {
+    let v = serde_json::json!({
+        "name": "x", "version": "0.1.0", "tools": [],
+        "commands": ["/subagents", "/usage"],
+        "turn_local": {
+            "/subagents": ["", "status", "view", "list", "open"],
+            "/usage": ["*"],
+            "/other": ["status"],
+        },
+    });
+    let m = Manifest::from_result(&v);
+    assert_eq!(
+        m.turn_local["/subagents"],
+        ["", "status", "view", "list", "open"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(m.turn_local["/usage"], vec!["*".to_string()]);
+    assert!(
+        !m.turn_local.contains_key("/other"),
+        "keys outside the plugin's own commands are ignored"
+    );
+
+    let m2 = Manifest::from_result(&serde_json::json!({
+        "name": "x", "tools": [], "commands": ["/a"],
+    }));
+    assert!(m2.turn_local.is_empty());
+}
+
+#[test]
+fn hook_adapter_carries_declared_turn_local_verbs() {
+    let m = Manifest::from_result(&serde_json::json!({
+        "name": "x", "version": "0.1.0", "tools": [],
+        "commands": ["/subagents", "/usage", "/plain"],
+        "turn_local": {"/subagents": ["", "status"], "/usage": ["*"]},
+    }));
+    let adapter =
+        gray_plugin::PluginHookAdapter::new(std::sync::Arc::new(ManifestPlugin(m)), "/tmp");
+    let cmds = gray_core::agent::PluginHooks::commands(&adapter);
+    let get = |name: &str| cmds.iter().find(|c| c.name == name).unwrap();
+    assert_eq!(
+        get("/subagents").turn_local_verbs,
+        vec![String::new(), "status".to_string()]
+    );
+    assert_eq!(get("/usage").turn_local_verbs, vec!["*".to_string()]);
+    assert!(get("/plain").turn_local_verbs.is_empty());
+}

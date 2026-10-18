@@ -161,6 +161,7 @@ impl gray_core::agent::PluginHooks for EchoHook {
         vec![gray_core::agent::PluginCommand {
             name: "/echo".to_string(),
             description: "echo back argv".to_string(),
+            turn_local_verbs: Vec::new(),
         }]
     }
 
@@ -177,6 +178,7 @@ impl gray_core::agent::PluginHooks for PromptHook {
         vec![gray_core::agent::PluginCommand {
             name: "/ask".to_string(),
             description: "submit argv as a prompt".to_string(),
+            turn_local_verbs: Vec::new(),
         }]
     }
 
@@ -288,45 +290,4 @@ fn connect_receipt_falls_back_to_the_endpoint_host_not_provider() {
         Some("localhost:8080")
     );
     assert_eq!(super::endpoint_host(""), None);
-}
-
-fn delivered(name: &str, to_chat: bool, failed: bool) -> crate::cron_serve::DeliveredFire {
-    crate::cron_serve::DeliveredFire {
-        id: "x".into(),
-        name: name.into(),
-        path: std::path::PathBuf::new(),
-        excerpt: String::new(),
-        to_chat,
-        reminder: false,
-        failed,
-        elapsed_ms: 0,
-    }
-}
-
-#[test]
-fn cron_tick_line_reads_as_a_notice() {
-    let rep = crate::cron_serve::TickReport {
-        fired: 1,
-        errors: 1,
-        delivered: vec![
-            delivered("flaky-job", false, true),
-            delivered("chat-drop", true, false),
-        ],
-    };
-    let line = super::cron_tick_line(&rep);
-    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(text.contains("cron"), "{text}");
-    assert!(text.contains("1 fired"), "{text}");
-    assert!(text.contains("1 error"), "{text}");
-    assert!(!text.contains("errors"), "singular for one: {text}");
-
-    assert!(text.contains("flaky-job"), "{text}");
-    assert!(!text.contains("chat-drop"), "{text}");
-
-    let errors = line
-        .spans
-        .iter()
-        .find(|s| s.content == "1 error")
-        .expect("error span");
-    assert_eq!(errors.style.fg, Some(crate::theme::theme().error_soft));
 }

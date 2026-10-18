@@ -96,14 +96,7 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
     },
     CmdDef {
         name: "jobs",
-        desc: "background jobs & scheduled wakes (u stops/removes)",
-        aliases: &[],
-        scope: CmdScope::Conversation,
-        surface: CmdSurface::Text,
-    },
-    CmdDef {
-        name: "cron",
-        desc: "cron jobs (space pauses; add/remove via gray cron)",
+        desc: "background jobs (u stops)",
         aliases: &[],
         scope: CmdScope::Conversation,
         surface: CmdSurface::Text,
@@ -612,8 +605,6 @@ pub enum ReplCommand {
     Restart,
     Usage,
 
-    CronJobs(Option<String>),
-
     Jobs,
 
     Gateway(Option<String>),
@@ -754,7 +745,6 @@ pub fn parse_command(line: &str) -> ReplCommand {
         Some("update") => ReplCommand::Update(opt(rest)),
         Some("restart") => ReplCommand::Restart,
         Some("usage") => ReplCommand::Usage,
-        Some("cron") => ReplCommand::CronJobs(opt(rest)),
         Some("jobs") => ReplCommand::Jobs,
         Some("gateway") => ReplCommand::Gateway(opt(rest)),
         Some("copy") => ReplCommand::Copy,

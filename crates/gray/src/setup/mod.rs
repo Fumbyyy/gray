@@ -68,11 +68,10 @@ pub(crate) use catalog::save_auth_key;
 pub use catalog::{
     AUTH_MODE_API_KEY, AUTH_MODE_NONE, Catalog, CatalogProvider, ConnectAuth, ConnectItem,
     PROVIDERS_JSON, SavedConfig, auto_update_enabled, auto_update_enabled_at, build_connect_items,
-    cron_auto_enabled, cron_auto_enabled_at, disabled_skill_names, gray_home, gw_auto_enabled,
-    gw_auto_enabled_at, intro_enabled, load_auth_keys, load_catalog, load_saved_config_at,
-    lock_saved_config_at, mask_key_pretty, normalize_custom_base_url, quality_of_life_enabled,
-    quality_of_life_enabled_at, save_saved_config_at, saved_config_path, skills_auto_enabled,
-    skills_auto_enabled_at,
+    disabled_skill_names, gray_home, gw_auto_enabled, gw_auto_enabled_at, intro_enabled,
+    load_auth_keys, load_catalog, load_saved_config_at, lock_saved_config_at, mask_key_pretty,
+    normalize_custom_base_url, quality_of_life_enabled, quality_of_life_enabled_at,
+    save_saved_config_at, saved_config_path, skills_auto_enabled, skills_auto_enabled_at,
 };
 
 pub fn user_home() -> anyhow::Result<std::path::PathBuf> {

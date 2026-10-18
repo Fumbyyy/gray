@@ -70,10 +70,75 @@ fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
+/// Environment contributed by plugins through the `shell_env` manifest
+/// field, merged once per registry build in plugin order.
+#[derive(Debug, Clone, Default)]
+pub struct PluginEnv {
+    vars: Vec<(String, String)>,
+    path_prepend: Vec<PathBuf>,
+}
+
+/// Variables gray sets itself in [`shell_env`]; plugins may not override
+/// them. `PATH` is reserved too — plugins extend it via `path_prepend`.
+const RESERVED_ENV: &[&str] = &[
+    "DEBIAN_FRONTEND",
+    "GIT_TERMINAL_PROMPT",
+    "SUDO_ASKPASS",
+    "TERM",
+    "NO_COLOR",
+    "CLICOLOR",
+    "PAGER",
+    "MANPAGER",
+    "GIT_PAGER",
+    "SYSTEMD_PAGER",
+    "GRAY_SESSION_ID",
+    "GRAY_CWD_REPORT",
+    "GRAY_PS_REPORT",
+    "PATH",
+];
+
+impl PluginEnv {
+    /// Fold one plugin's `shell_env` contribution into the merged set.
+    /// Reserved variable names and non-absolute `path_prepend` entries are
+    /// skipped with a warning.
+    pub fn add_plugin(
+        &mut self,
+        plugin: &str,
+        vars: impl IntoIterator<Item = (String, String)>,
+        path_prepend: impl IntoIterator<Item = PathBuf>,
+    ) {
+        for (key, value) in vars {
+            if RESERVED_ENV.contains(&key.as_str()) {
+                log::warn!("plugin {plugin} shell_env var {key:?} is reserved — skipping");
+                continue;
+            }
+            match self.vars.iter_mut().find(|(k, _)| *k == key) {
+                Some(slot) => slot.1 = value,
+                None => self.vars.push((key, value)),
+            }
+        }
+        for dir in path_prepend {
+            if !dir.is_absolute() {
+                log::warn!(
+                    "plugin {plugin} shell_env path_prepend {:?} is not absolute — skipping",
+                    dir.display()
+                );
+                continue;
+            }
+            self.path_prepend.push(dir);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.vars.is_empty() && self.path_prepend.is_empty()
+    }
+}
+
 fn shell_env(
     session: Option<&str>,
     cwd_report: Option<&Path>,
     ps_report: Option<&Path>,
+    plugin: Option<&PluginEnv>,
 ) -> Vec<(String, String)> {
     let mut env: Vec<(&str, &str)> = vec![
         ("DEBIAN_FRONTEND", "noninteractive"),
@@ -96,9 +161,14 @@ fn shell_env(
     if let Some(report) = ps_report {
         env.push(("GRAY_PS_REPORT", report.to_str().unwrap_or_default()));
     }
-    env.into_iter()
+    let mut env: Vec<(String, String)> = env
+        .into_iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect()
+        .collect();
+    if let Some(plugin) = plugin {
+        env.extend(plugin.vars.iter().cloned());
+    }
+    env
 }
 
 fn write_script(command: &str, env: &[(String, String)]) -> io::Result<PathBuf> {
@@ -121,6 +191,7 @@ pub fn spawn(
     session: Option<&str>,
     cwd_report: Option<&Path>,
     ps_report: Option<&Path>,
+    plugin_env: Option<&PluginEnv>,
 ) -> io::Result<Spawned> {
     let raw = std::env::var(EXEC_PREFIX_ENV).unwrap_or_default();
     let prefix = match raw.trim() {
@@ -137,7 +208,9 @@ pub fn spawn(
             _ => None,
         },
     };
-    spawn_with_prefix(command, cwd, session, cwd_report, prefix, ps_report)
+    spawn_with_prefix(
+        command, cwd, session, cwd_report, prefix, ps_report, plugin_env,
+    )
 }
 
 pub fn pipestatus_shell() -> bool {
@@ -179,8 +252,9 @@ pub fn spawn_with_prefix(
     cwd_report: Option<&Path>,
     prefix: Option<Vec<String>>,
     ps_report: Option<&Path>,
+    plugin_env: Option<&PluginEnv>,
 ) -> io::Result<Spawned> {
-    let env = shell_env(session, cwd_report, ps_report);
+    let mut env = shell_env(session, cwd_report, ps_report, plugin_env);
     let mut cmd = match &prefix {
         Some(argv) => {
             let mut cmd = Command::new(&argv[0]);
@@ -194,6 +268,26 @@ pub fn spawn_with_prefix(
         .stderr(std::process::Stdio::piped());
     for (key, value) in &env {
         cmd.env(key, value);
+    }
+    if let Some(dirs) = plugin_env.map(|p| p.path_prepend.as_slice())
+        && !dirs.is_empty()
+    {
+        // Plugin directories go ahead of whatever PATH the child would
+        // otherwise inherit (on Windows `local_command` has already added
+        // the shell's own directory, which is kept).
+        let base = cmd
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("PATH"))
+            .and_then(|(_, value)| value.map(std::ffi::OsString::from))
+            .or_else(|| std::env::var_os("PATH"));
+        let mut paths: Vec<PathBuf> = dirs.to_vec();
+        if let Some(base) = base {
+            paths.extend(std::env::split_paths(&base));
+        }
+        let joined = std::env::join_paths(&paths).map_err(io::Error::other)?;
+        cmd.env("PATH", &joined);
+        env.push(("PATH".to_string(), joined.to_string_lossy().into_owned()));
     }
     match &prefix {
         Some(_) => {

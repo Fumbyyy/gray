@@ -59,7 +59,7 @@ pub fn build_body(
 
 pub fn issue_url(title: &str, body: &str) -> String {
     let home = crate::setup::gray_home().unwrap_or_default();
-    let body = crate::cron_fire::redact_secrets(body, &home);
+    let body = crate::util::redact_secrets(body, &home);
     let short = if body.chars().count() > MAX_URL_BODY_CHARS {
         let cut: String = body.chars().take(MAX_URL_BODY_CHARS).collect();
         format!("{cut}\n… [truncated for URL — full text in local file]")
