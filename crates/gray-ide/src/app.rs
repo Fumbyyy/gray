@@ -571,7 +571,7 @@ impl GrayApp {
             if let Some(w) = self.window_handle {
                 let _ = w.update(cx, |view, window, cx| {
                     if let Ok(root) = view.downcast::<GrayApp>() {
-                        let _ = root.update(cx, |app, cx| {
+                        root.update(cx, |app, cx| {
                             for line in &lines {
                                 app.composer
                                     .update(cx, |s, cx| s.set_value(line.clone(), window, cx));
