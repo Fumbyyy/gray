@@ -1052,3 +1052,28 @@ fn gray_command_registry_lists_and_runs_via_palette() {
     assert_eq!(s["terminal_open"], true);
     g.screenshot("gray-cmd-help");
 }
+
+#[test]
+fn turn_diff_shows_changes_since_checkpoint() {
+    let Some(g) = Gray::start_with(
+        "turn_diff",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    g.send("write turn.txt hello from the agent");
+    g.wait_for("edit reply", |s| finished(s) && s["messages"].to_string().contains("turn.txt"));
+    g.palette("Diff since last turn");
+    let s = g.wait_for("turn diff open", |s| {
+        s["panel"] == "Diff"
+            && s["diff_base"].is_string()
+            && s["diff_files"]
+                .as_array()
+                .map(|a| a.iter().any(|f| f == "turn.txt"))
+                .unwrap_or(false)
+    });
+    g.screenshot("turn-diff");
+    g.palette("Diff vs HEAD");
+    g.wait_for("head diff", |s| s["diff_base"].is_null() && s["panel"] == "Diff");
+}

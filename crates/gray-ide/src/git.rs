@@ -100,6 +100,34 @@ pub fn diff(dir: &Path) -> String {
     text
 }
 
+pub fn diff_since(dir: &Path, base: &str) -> String {
+    let mut text = git(dir, &["diff", base, "--no-color"]).unwrap_or_default();
+    for (code, path) in status(dir) {
+        if code == "??"
+            && let Ok(d) = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["diff", "--no-color", "--no-index", "/dev/null", &path])
+                .output()
+        {
+            text.push_str(&String::from_utf8_lossy(&d.stdout));
+        }
+    }
+    text
+}
+
+pub fn files_since(dir: &Path, base: &str) -> Vec<String> {
+    let mut v: Vec<String> = git(dir, &["diff", "--name-only", base])
+        .map(|t| t.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+    for (code, path) in status(dir) {
+        if code == "??" && !v.contains(&path) {
+            v.push(path);
+        }
+    }
+    v
+}
+
 pub fn worktree_add(root: &Path, dir: &Path, branch: &str) -> Result<(), String> {
     let out = Command::new("git")
         .arg("-C")

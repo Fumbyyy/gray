@@ -128,6 +128,8 @@ enum Cmd {
     ResumeSession(String),
     DiscardChanges,
     Gray(String),
+    TurnDiff,
+    HeadDiff,
 }
 
 struct ActiveTurn {
@@ -171,6 +173,7 @@ pub struct GrayApp {
     gray_cmd_rx: Receiver<Vec<(String, String)>>,
     active_tab: Option<usize>,
     diff: Option<Entity<DiffState>>,
+    diff_base: Option<String>,
     diff_files: Vec<String>,
     branch: Option<String>,
     branches: Vec<String>,
@@ -277,6 +280,7 @@ impl GrayApp {
             pending_cmds: Vec::new(),
             active_tab: None,
             diff: None,
+            diff_base: None,
             diff_files: Vec::new(),
             branch: None,
             branches: Vec::new(),
@@ -384,9 +388,15 @@ impl GrayApp {
         if git::is_repo(&root) {
             self.branch = git::branch(&root);
             self.branches = git::branches(&root);
-            let text = git::diff(&root);
+            let text = match &self.diff_base {
+                Some(base) => git::diff_since(&root, base),
+                None => git::diff(&root),
+            };
             let files = DiffFile::parse(&text).unwrap_or_default();
-            self.diff_files = git::status(&root).into_iter().map(|(_, p)| p).collect();
+            self.diff_files = match &self.diff_base {
+                Some(base) => git::files_since(&root, base),
+                None => git::status(&root).into_iter().map(|(_, p)| p).collect(),
+            };
             self.diff = if files.is_empty() {
                 None
             } else {
@@ -560,6 +570,8 @@ impl GrayApp {
             "sessions" => Cmd::ToggleSessions,
             "resume" => Cmd::ResumeSession(arg),
             "gray" => Cmd::Gray(arg),
+            "turndiff" | "changes" => Cmd::TurnDiff,
+            "headdiff" => Cmd::HeadDiff,
             _ => {
                 self.toast(format!("Unknown command /{name}"), true);
                 cx.notify();
@@ -855,6 +867,8 @@ impl GrayApp {
             ));
         }
         items.push((k("Restore last checkpoint"), k("Git"), Cmd::Restore));
+        items.push((k("Diff since last turn"), k("Git"), Cmd::TurnDiff));
+        items.push((k("Diff vs HEAD"), k("Git"), Cmd::HeadDiff));
         items.push((
             k(if self.show_archived {
                 "Hide archived threads"
@@ -1092,6 +1106,37 @@ impl GrayApp {
                 if MODES.iter().any(|x| x.0 == m) {
                     self.configure(None, None, Some(m));
                 }
+            }
+            Cmd::TurnDiff => {
+                let tree = self
+                    .active_thread
+                    .as_ref()
+                    .and_then(|t| self.store.state.thread(t))
+                    .and_then(|t| {
+                        t.items.iter().rev().find_map(|i| match i {
+                            Item::Activity { kind, detail, .. } if kind == "checkpoint" => {
+                                Some(detail.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+                match tree {
+                    Some(tree) => {
+                        self.diff_base = Some(tree);
+                        self.panel = Some(Panel::Diff);
+                        self.refresh_workspace(cx);
+                    }
+                    None => {
+                        self.toast("No checkpoint in this thread", true);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            Cmd::HeadDiff => {
+                self.diff_base = None;
+                self.panel = Some(Panel::Diff);
+                self.refresh_workspace(cx);
             }
             Cmd::Gray(name) => {
                 self.terminal_open = true;
@@ -1633,6 +1678,7 @@ impl GrayApp {
             "active_tab": self.active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.path.clone()),
             "editor_text": self.active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.editor.read(cx).value().to_string()),
             "diff_files": self.diff_files,
+            "diff_base": self.diff_base,
             "terminal": self.terminal_lines.iter().rev().take(40).rev().cloned().collect::<Vec<_>>(),
             "composer": self.composer.read(cx).value().to_string(),
             "toast": self.toast.as_ref().map(|t| t.0.clone()),
