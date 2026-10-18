@@ -130,6 +130,7 @@ enum Cmd {
     Gray(String),
     TurnDiff,
     HeadDiff,
+    Approve(bool),
 }
 
 struct ActiveTurn {
@@ -170,6 +171,7 @@ pub struct GrayApp {
     viewer: Option<(String, Entity<EditorState>)>,
     gray_sessions: Vec<GraySession>,
     gray_cmds: Vec<(String, String)>,
+    pending_approval: Option<(String, String)>,
     gray_cmd_rx: Receiver<Vec<(String, String)>>,
     active_tab: Option<usize>,
     diff: Option<Entity<DiffState>>,
@@ -275,6 +277,7 @@ impl GrayApp {
             viewer: None,
             gray_sessions: Vec::new(),
             gray_cmds: Vec::new(),
+            pending_approval: None,
             gray_cmd_rx,
             window_handle: None,
             pending_cmds: Vec::new(),
@@ -570,6 +573,8 @@ impl GrayApp {
             "sessions" => Cmd::ToggleSessions,
             "resume" => Cmd::ResumeSession(arg),
             "gray" => Cmd::Gray(arg),
+            "approve" => Cmd::Approve(true),
+            "reject" => Cmd::Approve(false),
             "turndiff" | "changes" => Cmd::TurnDiff,
             "headdiff" => Cmd::HeadDiff,
             _ => {
@@ -599,6 +604,7 @@ impl GrayApp {
         let mut finished: Vec<(String, Result<(), String>)> = Vec::new();
         let mut activities: Vec<(String, String, String, String)> = Vec::new();
         let mut sessions: Vec<(String, String)> = Vec::new();
+        let mut approvals: Vec<(String, String)> = Vec::new();
         for (tid, active) in self.turns.iter_mut() {
             loop {
                 match active.turn.rx.try_recv() {
@@ -619,6 +625,10 @@ impl GrayApp {
                         changed = true;
                     }
                     Ok(ProviderEvent::Session(sid)) => sessions.push((tid.clone(), sid)),
+                    Ok(ProviderEvent::Approval { label }) => {
+                        approvals.push((tid.clone(), label));
+                        changed = true;
+                    }
                     Ok(ProviderEvent::Done) => {
                         finished.push((tid.clone(), Ok(())));
                         break;
@@ -634,6 +644,9 @@ impl GrayApp {
                     }
                 }
             }
+        }
+        for (tid, label) in approvals {
+            self.pending_approval = Some((tid, label));
         }
         for (tid, sid) in sessions {
             let provider = self.store.state.thread(&tid).map(|t| t.provider.clone());
@@ -868,6 +881,10 @@ impl GrayApp {
         }
         items.push((k("Restore last checkpoint"), k("Git"), Cmd::Restore));
         items.push((k("Diff since last turn"), k("Git"), Cmd::TurnDiff));
+        if self.pending_approval.is_some() {
+            items.push((k("Approve pending action"), k("Action"), Cmd::Approve(true)));
+            items.push((k("Reject pending action"), k("Action"), Cmd::Approve(false)));
+        }
         items.push((k("Diff vs HEAD"), k("Git"), Cmd::HeadDiff));
         items.push((
             k(if self.show_archived {
@@ -1138,6 +1155,24 @@ impl GrayApp {
                 self.panel = Some(Panel::Diff);
                 self.refresh_workspace(cx);
             }
+            Cmd::Approve(ok) => {
+                if let Some((tid, label)) = self.pending_approval.take() {
+                    if let Some(t) = self.turns.get(&tid)
+                        && let Ok(mut p) = t.turn.pending.lock()
+                        && let Some(tx) = p.take()
+                    {
+                        let _ = tx.send(ok);
+                    }
+                    self.persist(Event::ActivityAdded {
+                        thread_id: tid,
+                        id: new_id(),
+                        kind: "approval".into(),
+                        label: if ok { "Approved" } else { "Rejected" }.into(),
+                        detail: label,
+                        at: now(),
+                    });
+                }
+            }
             Cmd::Gray(name) => {
                 self.terminal_open = true;
                 self.run_terminal(format!("{} cmd run {name}", graycmds::bin()), cx);
@@ -1270,6 +1305,12 @@ impl GrayApp {
                 if let Some(tid) = &self.active_thread
                     && let Some(t) = self.turns.get(tid)
                 {
+                    if let Ok(mut p) = t.turn.pending.lock()
+                        && let Some(tx) = p.take()
+                    {
+                        let _ = tx.send(false);
+                    }
+                    self.pending_approval = None;
                     t.turn.cancel();
                 }
             }
@@ -1679,6 +1720,7 @@ impl GrayApp {
             "editor_text": self.active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.editor.read(cx).value().to_string()),
             "diff_files": self.diff_files,
             "diff_base": self.diff_base,
+            "approval": self.pending_approval.as_ref().map(|(_, l)| l.clone()),
             "terminal": self.terminal_lines.iter().rev().take(40).rev().cloned().collect::<Vec<_>>(),
             "composer": self.composer.read(cx).value().to_string(),
             "toast": self.toast.as_ref().map(|t| t.0.clone()),
@@ -2410,6 +2452,52 @@ impl GrayApp {
             .track_scroll(&self.scroll)
             .child(col)
             .into_any_element()
+    }
+
+    fn render_approval(&self, label: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        div()
+            .w_full()
+            .max_w(px(820.))
+            .mx_auto()
+            .px_6()
+            .pb_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(t.warning)
+                    .bg(t.warning.opacity(0.08))
+                    .px_3()
+                    .py_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(t.warning)
+                            .child(format!("Approve? {label}")),
+                    )
+                    .child(
+                        Button::new("approve")
+                            .primary()
+                            .small()
+                            .label("Approve")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run(Cmd::Approve(true), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("reject")
+                            .ghost()
+                            .small()
+                            .label("Reject")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run(Cmd::Approve(false), window, cx)
+                            })),
+                    ),
+            )
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3367,6 +3455,11 @@ impl Render for GrayApp {
             .h_full()
             .child(self.render_header(cx))
             .child(self.render_timeline(cx))
+            .children(
+                self.pending_approval
+                    .as_ref()
+                    .map(|(_, label)| self.render_approval(label, cx)),
+            )
             .child(self.render_composer(cx));
         if self.terminal_open {
             center = center.child(self.render_terminal(cx));

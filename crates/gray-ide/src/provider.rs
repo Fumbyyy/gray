@@ -19,6 +19,9 @@ pub enum ProviderEvent {
         detail: String,
     },
     Session(String),
+    Approval {
+        label: String,
+    },
     Done,
     Error(String),
 }
@@ -84,6 +87,7 @@ pub fn default_model(provider: &str) -> &'static str {
 
 pub struct Turn {
     pub rx: Receiver<ProviderEvent>,
+    pub pending: Arc<Mutex<Option<Sender<bool>>>>,
     child: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
 }
@@ -115,17 +119,22 @@ pub fn start(req: TurnRequest) -> Turn {
     let slot = child.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = cancelled.clone();
+    let pending = Arc::new(Mutex::new(None::<Sender<bool>>));
+    let pend = pending.clone();
     thread::spawn(move || {
         let result = if flag.load(Ordering::SeqCst) {
             Ok(())
         } else {
             match req.provider.as_str() {
-                "fake" => run_fake(&req, &tx, &flag),
+                "fake" => run_fake(&req, &tx, &flag, &pend),
                 "claude" => run_process(claude_command(&req), &tx, &slot, &flag, parse_claude),
                 "codex" => run_process(codex_command(&req), &tx, &slot, &flag, parse_codex),
                 _ => run_process(gray_command(&req), &tx, &slot, &flag, parse_gray),
             }
         };
+        if let Ok(mut p) = pend.lock() {
+            *p = None;
+        }
         match result {
             Ok(()) => {
                 let _ = tx.send(ProviderEvent::Done);
@@ -137,6 +146,7 @@ pub fn start(req: TurnRequest) -> Turn {
     });
     Turn {
         rx,
+        pending,
         child,
         cancelled,
     }
@@ -469,10 +479,24 @@ pub fn parse_codex(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEv
     out
 }
 
+fn ask_approval(
+    tx: &Sender<ProviderEvent>,
+    pending: &Arc<Mutex<Option<Sender<bool>>>>,
+    label: String,
+) -> bool {
+    let (atx, arx) = channel();
+    if let Ok(mut p) = pending.lock() {
+        *p = Some(atx);
+    }
+    let _ = tx.send(ProviderEvent::Approval { label });
+    arx.recv().unwrap_or(false)
+}
+
 fn run_fake(
     req: &TurnRequest,
     tx: &Sender<ProviderEvent>,
     cancelled: &Arc<AtomicBool>,
+    pending: &Arc<Mutex<Option<Sender<bool>>>>,
 ) -> Result<(), String> {
     let delay = Duration::from_millis(
         std::env::var("GRAY_IDE_FAKE_DELAY_MS")
@@ -498,25 +522,41 @@ fn run_fake(
     });
     if let Some(rest) = prompt.strip_prefix("write ") {
         let (path, content) = rest.split_once(' ').unwrap_or((rest, ""));
-        write_file(&req.cwd, path, content)?;
-        let _ = tx.send(ProviderEvent::Activity {
-            kind: "edit".into(),
-            label: format!("Edited {path}"),
-            detail: format!("+{} lines", content.lines().count().max(1)),
-        });
+        if req.mode == "readonly" && !ask_approval(tx, pending, format!("Write {path}")) {
+            let _ = tx.send(ProviderEvent::Activity {
+                kind: "approval".into(),
+                label: "Rejected".into(),
+                detail: format!("Write {path}"),
+            });
+        } else {
+            write_file(&req.cwd, path, content)?;
+            let _ = tx.send(ProviderEvent::Activity {
+                kind: "edit".into(),
+                label: format!("Edited {path}"),
+                detail: format!("+{} lines", content.lines().count().max(1)),
+            });
+        }
     }
     if let Some(cmd) = prompt.strip_prefix("run ") {
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(&req.cwd)
-            .output()
-            .map_err(|e| e.to_string())?;
-        let _ = tx.send(ProviderEvent::Activity {
-            kind: "command".into(),
-            label: cmd.to_string(),
-            detail: String::from_utf8_lossy(&output.stdout).to_string(),
-        });
+        if req.mode == "readonly" && !ask_approval(tx, pending, format!("Run `{cmd}`")) {
+            let _ = tx.send(ProviderEvent::Activity {
+                kind: "approval".into(),
+                label: "Rejected".into(),
+                detail: format!("Run {cmd}"),
+            });
+        } else {
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(&req.cwd)
+                .output()
+                .map_err(|e| e.to_string())?;
+            let _ = tx.send(ProviderEvent::Activity {
+                kind: "command".into(),
+                label: cmd.to_string(),
+                detail: String::from_utf8_lossy(&output.stdout).to_string(),
+            });
+        }
     }
     if prompt.contains("slow") {
         thread::sleep(Duration::from_secs(5));

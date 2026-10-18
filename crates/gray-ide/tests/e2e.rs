@@ -270,6 +270,13 @@ impl Gray {
     }
 
     fn send(&self, text: &str) {
+        for _ in 0..5 {
+            if self.state()["palette_open"] == false {
+                break;
+            }
+            self.key("Escape");
+            sleep(Duration::from_millis(200));
+        }
         for i in 0..8 {
             self.focus_window();
             if i == 4 {
@@ -313,10 +320,32 @@ impl Gray {
     }
 
     fn palette(&self, query: &str) {
-        self.key("ctrl+k");
+        for _ in 0..10 {
+            if self.state()["palette_open"] == true {
+                break;
+            }
+            self.key("ctrl+k");
+            sleep(Duration::from_millis(300));
+        }
         self.wait_for("palette open", |s| s["palette_open"] == true);
-        self.type_text(query);
-        self.key("Return");
+        for _ in 0..12 {
+            if self.state()["palette_query"] == query {
+                break;
+            }
+            self.key("ctrl+a");
+            self.key("BackSpace");
+            self.type_text(query);
+        }
+        assert_eq!(self.state()["palette_query"], query);
+        for _ in 0..12 {
+            self.key("Return");
+            for _ in 0..6 {
+                if self.state()["palette_open"] == false {
+                    return;
+                }
+                sleep(Duration::from_millis(200));
+            }
+        }
         self.wait_for("palette closed", |s| s["palette_open"] == false);
     }
 
@@ -1080,4 +1109,52 @@ fn turn_diff_shows_changes_since_checkpoint() {
     g.wait_for("head diff", |s| {
         s["diff_base"].is_null() && s["panel"] == "Diff"
     });
+}
+
+#[test]
+fn approval_gates_writes_in_readonly_mode() {
+    let Some(g) = Gray::start_with(
+        "approvals",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    g.send("first");
+    g.wait_for("reply", finished);
+    g.palette("Mode: Read only");
+    g.wait_for("readonly", |s| s["thread"]["mode"] == "readonly");
+
+    g.send("write guarded.txt secret");
+    g.wait_for("approval shown", |s| {
+        s["approval"]
+            .as_str()
+            .map(|a| a.contains("Write guarded.txt"))
+            .unwrap_or(false)
+    });
+    g.screenshot("approval-banner");
+    assert!(!g.project.join("guarded.txt").exists());
+    g.send("/reject");
+    g.wait_for("rejected", |s| {
+        finished(s) && s["activities"].to_string().contains("Rejected")
+    });
+    assert!(!g.project.join("guarded.txt").exists());
+
+    g.send("write allowed.txt ok");
+    g.wait_for("approval shown again", |s| {
+        s["approval"]
+            .as_str()
+            .map(|a| a.contains("Write allowed.txt"))
+            .unwrap_or(false)
+    });
+    g.send("/approve");
+    g.wait_for("approved", |s| {
+        finished(s) && s["activities"].to_string().contains("Approved")
+    });
+    assert_eq!(
+        fs::read_to_string(g.project.join("allowed.txt"))
+            .unwrap()
+            .trim(),
+        "ok"
+    );
 }
