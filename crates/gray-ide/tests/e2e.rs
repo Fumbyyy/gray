@@ -1011,3 +1011,35 @@ fn gray_sessions_panel_lists_and_resumes() {
         s["thread"]["session"] == "test-session-01" && s["thread"]["provider"] == "gray"
     });
 }
+
+#[test]
+fn gray_command_registry_lists_and_runs_via_palette() {
+    let Some(bin) = gray_bin() else {
+        return;
+    };
+    let Some(g) = Gray::start_with(
+        "gray_cmds",
+        "fake",
+        vec![
+            ("GRAY_IDE_GRAY_BIN".into(), bin.display().to_string()),
+            ("GRAY_HOME".into(), "/tmp/gray-e2e-gc-home".into()),
+        ],
+    ) else {
+        return;
+    };
+    g.wait_for("gray commands loaded", |s| {
+        s["gray_cmds"]
+            .as_array()
+            .map(|a| a.iter().any(|i| i == "help"))
+            .unwrap_or(false)
+    });
+    g.palette("gray: help");
+    let s = g.wait_for("gray cmd output", |s| {
+        s["terminal"]
+            .as_array()
+            .map(|a| a.iter().any(|l| l.as_str().unwrap_or("").contains("models")))
+            .unwrap_or(false)
+    });
+    assert_eq!(s["terminal_open"], true);
+    g.screenshot("gray-cmd-help");
+}

@@ -1,4 +1,5 @@
 use crate::git;
+use crate::graycmds;
 use crate::plugins::{self, HubEntry, Installed, PluginMsg};
 use crate::provider::{self, MODES, PROVIDERS, ProviderEvent, Turn, TurnRequest};
 use crate::sessions::{self, GraySession};
@@ -126,6 +127,7 @@ enum Cmd {
     ToggleSessions,
     ResumeSession(String),
     DiscardChanges,
+    GrayCmd(String),
 }
 
 struct ActiveTurn {
@@ -165,6 +167,8 @@ pub struct GrayApp {
     tabs: Vec<Tab>,
     viewer: Option<(String, Entity<EditorState>)>,
     gray_sessions: Vec<GraySession>,
+    gray_cmds: Vec<(String, String)>,
+    gray_cmd_rx: Receiver<Vec<(String, String)>>,
     active_tab: Option<usize>,
     diff: Option<Entity<DiffState>>,
     diff_files: Vec<String>,
@@ -238,6 +242,10 @@ impl GrayApp {
             },
         ));
         let (plugin_tx, plugin_rx) = channel();
+        let (gray_cmd_tx, gray_cmd_rx) = channel::<Vec<(String, String)>>();
+        std::thread::spawn(move || {
+            let _ = gray_cmd_tx.send(graycmds::list());
+        });
         let mut app = Self {
             focus: cx.focus_handle(),
             store,
@@ -263,6 +271,8 @@ impl GrayApp {
             tabs: Vec::new(),
             viewer: None,
             gray_sessions: Vec::new(),
+            gray_cmds: Vec::new(),
+            gray_cmd_rx,
             window_handle: None,
             pending_cmds: Vec::new(),
             active_tab: None,
@@ -549,6 +559,7 @@ impl GrayApp {
             "view" | "preview" => Cmd::PreviewFile(arg),
             "sessions" => Cmd::ToggleSessions,
             "resume" => Cmd::ResumeSession(arg),
+            "gray" => Cmd::GrayCmd(arg),
             _ => {
                 self.toast(format!("Unknown command /{name}"), true);
                 cx.notify();
@@ -675,6 +686,10 @@ impl GrayApp {
                 at: now(),
             });
             self.refresh_workspace(cx);
+        }
+        while let Ok(cmds) = self.gray_cmd_rx.try_recv() {
+            changed = true;
+            self.gray_cmds = cmds;
         }
         while let Ok(msg) = self.plugin_rx.try_recv() {
             changed = true;
@@ -818,6 +833,9 @@ impl GrayApp {
                 k("Theme"),
                 Cmd::SetBackground(b.0.into()),
             ));
+        }
+        for (n, d) in &self.gray_cmds {
+            items.push((format!("gray: {n}"), d.clone(), Cmd::GrayCmd(n.clone())));
         }
         for h in &self.hub {
             items.push((
@@ -1074,6 +1092,10 @@ impl GrayApp {
                 if MODES.iter().any(|x| x.0 == m) {
                     self.configure(None, None, Some(m));
                 }
+            }
+            Cmd::GrayCmd(name) => {
+                self.terminal_open = true;
+                self.run_terminal(format!("{} cmd run {name}", graycmds::bin()), cx);
             }
             Cmd::DiscardChanges => {
                 let before = self.tabs.len();
@@ -1590,6 +1612,11 @@ impl GrayApp {
             "theme": cx.theme().mode.name(),
             "background": self.store.state.setting("background", "none"),
             "viewer": self.viewer.as_ref().map(|(p, _)| p.clone()),
+            "gray_cmds": self
+                .gray_cmds
+                .iter()
+                .map(|c| c.0.clone())
+                .collect::<Vec<_>>(),
             "gray_sessions": self.gray_sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
             "project": self.active_project.as_ref().and_then(|p| self.store.state.project(p)).map(|p| serde_json::json!({"name": p.name, "path": p.path})),
             "projects": self.store.state.projects.len(),
