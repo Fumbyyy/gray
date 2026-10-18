@@ -193,32 +193,6 @@ pub(crate) async fn run_prompt_turn(
     let user_msg = build_user_message_with_attachments(&prompt_text, &images);
     let user_msg_for_retry = user_msg.clone();
     let mut initial_count = agent.messages().len();
-    {
-        let latest = tui
-            .as_ref()
-            .and_then(|(s, _)| s.lock().ok().and_then(|t| t.latest_usage));
-        maybe_threshold_compact(
-            agent,
-            config,
-            &mut *session_state,
-            cwd,
-            tui.as_ref().map(|(s, _)| s),
-            latest,
-            &mut initial_count,
-        )
-        .await;
-    }
-
-    if agent.prefix_rewrite_ok()
-        && let Some(s) = &tui_stream
-        && s.lock().expect("tui lock").cache_is_cold()
-    {
-        agent.mask_stale_tool_output();
-    }
-
-    if let Some(s) = &tui_stream {
-        s.lock().expect("tui lock").begin_turn("Working");
-    }
 
     let watch_cancel = cancel.clone();
     let watch_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -245,6 +219,35 @@ pub(crate) async fn run_prompt_turn(
         cwd_for_watcher,
         turn_locals,
     );
+
+    {
+        let latest = tui
+            .as_ref()
+            .and_then(|(s, _)| s.lock().ok().and_then(|t| t.latest_usage));
+        tokio::select! {
+            _ = cancel.cancelled() => {}
+            _ = maybe_threshold_compact(
+                agent,
+                config,
+                &mut *session_state,
+                cwd,
+                tui.as_ref().map(|(s, _)| s),
+                latest,
+                &mut initial_count,
+            ) => {}
+        }
+    }
+
+    if agent.prefix_rewrite_ok()
+        && let Some(s) = &tui_stream
+        && s.lock().expect("tui lock").cache_is_cold()
+    {
+        agent.mask_stale_tool_output();
+    }
+
+    if let Some(s) = &tui_stream {
+        s.lock().expect("tui lock").begin_turn("Working");
+    }
 
     let mut pending_tools: HashMap<String, (String, Option<serde_json::Value>)> = HashMap::new();
     let mut turn_usage: Option<gray_core::event::Usage> = None;
@@ -342,16 +345,18 @@ pub(crate) async fn run_prompt_turn(
     let mut retry_msg = user_msg_for_retry.clone();
     let recover = match &run_result {
         Err(e) => {
-            maybe_overflow_compact(
-                agent,
-                config,
-                &mut *session_state,
-                cwd,
-                tui.as_ref().map(|(s, _)| s),
-                &mut initial_count,
-                e,
-            )
-            .await
+            tokio::select! {
+                _ = cancel.cancelled() => false,
+                r = maybe_overflow_compact(
+                    agent,
+                    config,
+                    &mut *session_state,
+                    cwd,
+                    tui.as_ref().map(|(s, _)| s),
+                    &mut initial_count,
+                    e,
+                ) => r,
+            }
         }
         Ok(evs)
             if evs.iter().rev().any(|e| {
@@ -364,16 +369,18 @@ pub(crate) async fn run_prompt_turn(
                 )
             }) =>
         {
-            let recovered = super::session::recovery_compact(
-                agent,
-                config,
-                &mut *session_state,
-                cwd,
-                tui.as_ref().map(|(s, _)| s),
-                &mut initial_count,
-                "after truncated response",
-            )
-            .await;
+            let recovered = tokio::select! {
+                _ = cancel.cancelled() => false,
+                r = super::session::recovery_compact(
+                    agent,
+                    config,
+                    &mut *session_state,
+                    cwd,
+                    tui.as_ref().map(|(s, _)| s),
+                    &mut initial_count,
+                    "after truncated response",
+                ) => r,
+            };
             if recovered {
                 let mut msgs = agent.messages().to_vec();
                 if msgs
