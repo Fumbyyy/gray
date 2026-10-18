@@ -257,12 +257,6 @@ fn tool_def(jobs: bool) -> ToolDef {
         );
     }
 
-    const CRON: &str = if cfg!(windows) {
-        ""
-    } else {
-        " To come back at a time instead, `gray cron add \"in 30m\" \"<note to self>\" --reminder` \
-         wakes this session (or posts back to this chat); don't run `cron serve`/`tick` to wait for it."
-    };
     let default = default_timeout();
     ToolDef::new(
         "bash",
@@ -273,7 +267,7 @@ fn tool_def(jobs: bool) -> ToolDef {
              To wait for it, end your turn: a finished job wakes you, no polling needed. Peek with \
              `tail <log>`. A command that exits while leaving its process group alive (`nohup ... &`, \
              `cmd &`) is registered as a background job the same way. If a command sleeps, pass a `timeout` longer than the sleep. For a hard \
-             limit, write `timeout N cmd` yourself. {VIEW}{CRON}"
+             limit, write `timeout N cmd` yourself. {VIEW}"
         ),
         json!({
             "type": "object",
@@ -934,8 +928,7 @@ fn media_dump_refusal(command: &str, cwd: &Path) -> Option<String> {
             if !bare_missing {
                 return Some(format!(
                     "refused: `{t} {arg}` would dump raw media bytes into context. \
-                     Attach the file instead — a bare `cat {arg}` shows it to the model; \
-                     if this model has no image input, use the `modlens` skill."
+                     Attach the file instead — a bare `cat {arg}` shows it to the model."
                 ));
             }
         }

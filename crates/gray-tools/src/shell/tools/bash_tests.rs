@@ -1547,10 +1547,9 @@ fn the_schema_is_command_and_timeout_only() {
             def.description
         );
     }
-    #[cfg(not(windows))]
     assert!(
-        def.description.contains("--reminder"),
-        "{}",
+        !def.description.contains("gray cron"),
+        "core must not advertise plugin commands: {}",
         def.description
     );
     let timeout = def.parameters["properties"]["timeout"]["description"]
