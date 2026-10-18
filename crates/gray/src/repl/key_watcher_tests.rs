@@ -173,11 +173,7 @@ fn plugin_undeclared_verbs_and_commands_queue() {
 
 #[test]
 fn mutating_or_agent_commands_still_queue() {
-    for cmd in [
-        "/model",
-        "/compact",
-        "normal follow-up",
-    ] {
+    for cmd in ["/model", "/compact", "normal follow-up"] {
         assert!(!is_turn_local_command(cmd, &hooks()), "{cmd}");
     }
 }

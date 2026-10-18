@@ -30,7 +30,8 @@ async fn unsupported_operations_fail_without_shell_or_service_side_effects() {
         assert!(
             error.contains("native Windows")
                 || error.contains("moved to")
-                || error.contains("no plugin command"),
+                || error.contains("no plugin command")
+                || error.contains("is provided by the gateway plugin"),
             "{args:?}: {error}"
         );
     }
