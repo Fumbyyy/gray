@@ -746,7 +746,6 @@ fn intro_stage(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) -> Opt
         w as u16,
         (h - start) as u16,
     ));
-    terminal.reset_gap();
 
     for _ in 0..64 {
         match crossterm::event::poll(Duration::ZERO) {
