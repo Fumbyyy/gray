@@ -115,6 +115,7 @@ enum Cmd {
     Snooze(i64),
     Worktree(String),
     Effort(String),
+    SetBackground(String),
 }
 
 struct ActiveTurn {
@@ -515,6 +516,7 @@ impl GrayApp {
             "snooze" => Cmd::Snooze(arg.parse().unwrap_or(60)),
             "worktree" => Cmd::Worktree(arg),
             "effort" => Cmd::Effort(arg),
+            "background" | "bg" => Cmd::SetBackground(arg),
             _ => {
                 self.toast(format!("Unknown command /{name}"), true);
                 cx.notify();
@@ -1172,6 +1174,20 @@ impl GrayApp {
                     self.store.append(Event::ThreadSnoozed { id, until });
                 }
             }
+            Cmd::SetBackground(b) => {
+                self.store.append(Event::SettingChanged {
+                    key: "background".into(),
+                    value: b.clone(),
+                });
+                self.toast(
+                    if b == "none" {
+                        "Background cleared".into()
+                    } else {
+                        format!("Background: {b}")
+                    },
+                    false,
+                );
+            }
             Cmd::Effort(e) => {
                 if ["low", "medium", "high"].contains(&e.as_str()) {
                     if let Some(id) = self.active_thread.clone() {
@@ -1342,6 +1358,7 @@ impl GrayApp {
             "palette_items": self.palette_items().iter().take(12).map(|i| i.0.clone()).collect::<Vec<_>>(),
             "panel": self.panel.map(|p| format!("{p:?}")),
             "theme": cx.theme().mode.name(),
+            "background": self.store.state.setting("background", "none"),
             "project": self.active_project.as_ref().and_then(|p| self.store.state.project(p)).map(|p| serde_json::json!({"name": p.name, "path": p.path})),
             "projects": self.store.state.projects.len(),
             "thread": thread.map(|t| serde_json::json!({"id": t.id, "title": t.title, "provider": t.provider, "model": t.model, "mode": t.mode, "pinned": t.pinned, "settled": t.settled, "snoozed": t.snoozed_until > now(), "worktree": t.worktree, "effort": t.effort, "session": t.session.as_ref().map(|s| s.1.clone())})),
@@ -2020,7 +2037,13 @@ impl GrayApp {
                         .size_16()
                         .text_color(t.foreground),
                 )
-                .child(div().text_3xl().font_family("Brygada 1918").child("Gray"))
+                .child(
+                    div()
+                        .text_3xl()
+                        .font_family("Plus Jakarta Sans")
+                        .font_bold()
+                        .child("Gray"),
+                )
                 .child(div().text_color(t.muted_foreground).child(match project {
                     Some(p) => format!("What should we build in {p}?"),
                     None => "Open a project to get started".to_string(),
@@ -2666,6 +2689,14 @@ impl GrayApp {
                         modes.into_any_element(),
                     ))
                     .child(row(
+                        "Background",
+                        "Dithered wallpaper behind the chat (custom path: /background <file>)",
+                        h_flex()
+                            .gap_1()
+                            .children(bg_rows(cx, self))
+                            .into_any_element(),
+                    ))
+                    .child(row(
                         "Data directory",
                         "Event log and settings",
                         div()
@@ -2748,6 +2779,43 @@ fn render_item(item: &Item, t: &Theme) -> AnyElement {
     }
 }
 
+fn background_layer(bg: &str) -> Div {
+    div().absolute().inset_0().overflow_hidden().child(
+        match bg {
+            "andromeda" => img("bg/andromeda.png"),
+            "bluemarble" => img("bg/bluemarble.png"),
+            path => img(PathBuf::from(path)),
+        }
+        .w_full()
+        .h_full()
+        .opacity(0.16)
+        .grayscale(true),
+    )
+}
+
+fn bg_rows(cx: &mut Context<GrayApp>, app: &GrayApp) -> Vec<AnyElement> {
+    let cur = app.store.state.setting("background", "none");
+    [
+        ("none", "None"),
+        ("andromeda", "Andromeda"),
+        ("bluemarble", "Blue Marble"),
+    ]
+    .into_iter()
+    .map(|(id, label)| {
+        let id = id.to_string();
+        Button::new(SharedString::from(format!("bg-{}", id)))
+            .small()
+            .label(label)
+            .selected(cur == id)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.run(Cmd::SetBackground(id.clone()), window, cx);
+                this.settings_open = true;
+            }))
+            .into_any_element()
+    })
+    .collect()
+}
+
 fn relative(ms: i64) -> String {
     let secs = ((now() - ms) / 1000).max(0);
     if secs < 60 {
@@ -2784,6 +2852,7 @@ impl Render for GrayApp {
         if let Some(p) = self.panel {
             main = main.child(self.render_panel(p, cx));
         }
+        let bg = self.store.state.setting("background", "none");
         div()
             .id("gray-root")
             .key_context("GrayApp")
@@ -2841,6 +2910,7 @@ impl Render for GrayApp {
                 this.open_palette(PaletteMode::Commands, "Branch:", w, cx)
             }))
             .child(main)
+            .when(bg != "none", |s| s.child(background_layer(&bg)))
             .when(self.palette_open, |s| s.child(self.render_palette(cx)))
             .when(self.settings_open, |s| s.child(self.render_settings(cx)))
             .when_some(self.toast.clone(), |s, (msg, err)| {

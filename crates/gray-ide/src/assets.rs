@@ -9,6 +9,8 @@ impl AssetSource for GrayAssets {
             "icons/gray-logo.svg" => Some(include_bytes!("../assets/icons/gray-logo.svg")),
             "icons/claude.svg" => Some(include_bytes!("../assets/icons/claude.svg")),
             "icons/openai.svg" => Some(include_bytes!("../assets/icons/openai.svg")),
+            "bg/andromeda.png" => Some(include_bytes!("../assets/andromeda-dither.png")),
+            "bg/bluemarble.png" => Some(include_bytes!("../assets/bluemarble-dither.png")),
             _ => None,
         };
         if let Some(b) = bytes {

@@ -847,3 +847,21 @@ fn brand_logo_and_churning_loader_render() {
     assert!(s["turn_seconds"].as_f64().unwrap() > 0.0);
     g.wait_for("turn done", |s| s["running"] == false);
 }
+
+#[test]
+fn background_wallpaper_renders_and_persists() {
+    let Some(mut g) = Gray::start("bg") else {
+        return;
+    };
+    g.send("/background andromeda");
+    g.wait_for("background set", |s| s["background"] == "andromeda");
+    let shot = g.screenshot("bg-andromeda");
+    assert!(
+        max_pixel(&shot, 700, 300, 200, 150) > 25,
+        "dithered wallpaper not visible"
+    );
+    g.restart();
+    g.wait_for("background persisted", |s| s["background"] == "andromeda");
+    g.send("/bg none");
+    g.wait_for("background cleared", |s| s["background"] == "none");
+}
