@@ -206,13 +206,17 @@ impl Gray {
             return;
         }
         let _ = Command::new("xdotool")
-            .args(["search", "--pid", &pid.to_string()])
+            .args(["search", "--onlyvisible", "--pid", &pid.to_string()])
             .env("DISPLAY", &self.display)
             .output()
             .map(|o| {
                 for w in String::from_utf8_lossy(&o.stdout).lines() {
                     let _ = Command::new("xdotool")
-                        .args(["windowfocus", "--sync", w])
+                        .args(["windowactivate", w])
+                        .env("DISPLAY", &self.display)
+                        .status();
+                    let _ = Command::new("xdotool")
+                        .args(["windowfocus", w])
                         .env("DISPLAY", &self.display)
                         .status();
                 }
@@ -225,7 +229,7 @@ impl Gray {
             return;
         }
         let wids = Command::new("xdotool")
-            .args(["search", "--pid", &pid.to_string()])
+            .args(["search", "--onlyvisible", "--pid", &pid.to_string()])
             .env("DISPLAY", &self.display)
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
