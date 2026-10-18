@@ -944,7 +944,7 @@ impl GrayApp {
     fn dirty_tabs(&self, cx: &App) -> usize {
         self.tabs
             .iter()
-            .filter(|t| t.editor.read(cx).value().to_string() != t.saved)
+            .filter(|t| t.editor.read(cx).value() != t.saved)
             .count()
     }
 
@@ -1061,7 +1061,7 @@ impl GrayApp {
             Cmd::DiscardChanges => {
                 let before = self.tabs.len();
                 self.tabs
-                    .retain(|t| t.editor.read(cx).value().to_string() == t.saved);
+                    .retain(|t| t.editor.read(cx).value() == t.saved);
                 let dropped = before - self.tabs.len();
                 self.active_tab = self.active_tab.filter(|i| *i < self.tabs.len());
                 self.toast(
@@ -1318,7 +1318,7 @@ impl GrayApp {
                 let model = self
                     .store
                     .state
-                    .setting("default_model.gray", &provider::default_model("gray"));
+                    .setting("default_model.gray", provider::default_model("gray"));
                 self.persist(Event::ThreadConfigured {
                     id: tid.clone(),
                     provider: "gray".into(),
