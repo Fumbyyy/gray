@@ -10,6 +10,7 @@ members = [
     "crates/gray-pkg",
     "crates/fsearch",
 ]
+exclude = ["crates/gray-ide"]
 [workspace.package]
 version = "0.2.2"
 edition = "2024"
