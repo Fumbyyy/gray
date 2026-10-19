@@ -53,6 +53,7 @@ where
     pub viewport_area: Rect,
     pub last_known_screen_size: Size,
     scrollback: Scrollback,
+    vacated_above: u16,
 }
 
 impl<B> Drop for CustomTerminal<B>
@@ -95,6 +96,7 @@ where
             viewport_area,
             last_known_screen_size: screen_size,
             scrollback,
+            vacated_above: 0,
         };
         term.set_viewport_area(viewport_area);
         term
@@ -114,13 +116,29 @@ where
         area.height = height.min(screen_size.height);
         area.width = screen_size.width;
         let bottom = screen_size.height.saturating_sub(area.height);
-        // The band keeps its top row: a shrink leaves the vacated rows
-        // below the band, the same state as the band floating under the
-        // intro at startup.
-        area.y = area.y.min(bottom);
-        let wanted_bottom = old.y.saturating_add(area.height);
-        if wanted_bottom > screen_size.height && !screen_shrank {
-            self.scroll_history_up(old.y, wanted_bottom - screen_size.height)?;
+        // A band pinned to the screen bottom stays pinned: a shrink (the
+        // palette closing, live rows collapsing) drops the band back down
+        // and leaves the vacated rows above it for insert_before to
+        // reclaim; a growth rises into those vacated rows first and
+        // scrolls history only for what is left over. A floating band —
+        // the intro state, or a composer that never reached the bottom —
+        // keeps its top row and vacates below instead.
+        if old.bottom() >= screen_size.height {
+            let rise = old.y.saturating_sub(bottom);
+            let consumed = self.vacated_above.min(rise);
+            self.vacated_above -= consumed;
+            if rise > consumed && !screen_shrank {
+                self.scroll_history_up(old.y, rise - consumed)?;
+            }
+            self.vacated_above += bottom.saturating_sub(old.y);
+            area.y = bottom;
+        } else {
+            self.vacated_above = 0;
+            area.y = area.y.min(bottom);
+            let wanted_bottom = old.y.saturating_add(area.height);
+            if wanted_bottom > screen_size.height && !screen_shrank {
+                self.scroll_history_up(old.y, wanted_bottom - screen_size.height)?;
+            }
         }
 
         if area != self.viewport_area {
@@ -156,6 +174,7 @@ where
         write!(self.backend, "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H")?;
         Backend::flush(&mut self.backend)?;
         self.last_known_screen_size = screen_size;
+        self.vacated_above = 0;
         self.set_viewport_area(Rect::new(0, 0, screen_size.width, 0));
         self.buffers[1 - self.current].reset();
         Ok(())
@@ -235,6 +254,16 @@ where
         draw_fn(&mut buffer);
         let all_rows: Vec<&[Cell]> = buffer.content.chunks(width as usize).collect();
         let mut rows = all_rows.as_slice();
+
+        // Rows a shrinking band vacated above itself get refilled before
+        // anything scrolls: the transcript tail continues there.
+        let reclaim = rows.len().min(usize::from(self.vacated_above));
+        if reclaim > 0 {
+            let y = self.viewport_area.top().saturating_sub(self.vacated_above);
+            self.draw_rows(y, &rows[..reclaim])?;
+            self.vacated_above -= reclaim as u16;
+            rows = &rows[reclaim..];
+        }
 
         if self.scrollback == Scrollback::Regions {
             let screen_h = self.last_known_screen_size.height;

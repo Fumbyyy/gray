@@ -305,7 +305,7 @@ fn the_band_sits_under_a_short_transcript() {
 }
 
 #[test]
-fn a_shrunk_band_keeps_its_top_row() {
+fn a_shrunk_grounded_band_returns_to_the_bottom() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);
     let history: Vec<String> = rows(0..20);
     insert(
@@ -315,17 +315,17 @@ fn a_shrunk_band_keeps_its_top_row() {
     band(&mut term, 4);
     assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
 
-    // A modal/popup grows the band; when it closes the band keeps the top
-    // row the popup left it on and floats above the vacated rows.
+    // A modal/popup grows the band; when it closes the band drops back
+    // to the screen bottom and the vacated rows open above it.
     band(&mut term, 8);
     assert_eq!(term.viewport_area, Rect::new(0, 2, W, 8));
     band(&mut term, 4);
-    assert_eq!(term.viewport_area, Rect::new(0, 2, W, 4));
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
 
     let screen = Screen::replay(&tape, W, 10);
     assert_eq!(screen.lines()[..2], rows(18..20)[..]);
-    assert_eq!(screen.lines()[2..6], band_rows(4)[..]);
-    assert!(screen.lines()[6..].iter().all(String::is_empty));
+    assert!(screen.lines()[2..6].iter().all(String::is_empty));
+    assert_eq!(screen.lines()[6..], band_rows(4)[..]);
 }
 
 #[test]
@@ -434,31 +434,31 @@ fn growth_past_the_bottom_scrolls_only_the_overflow() {
 }
 
 #[test]
-fn a_grounded_shrink_leaves_the_band_floating_on_its_top_row() {
+fn a_grounded_shrink_drops_the_band_back_to_the_bottom() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);
     insert(&mut term, &["r0", "r1", "r2", "r3"]);
     band(&mut term, 6);
     band(&mut term, 4);
-    // the band keeps its top row: the transcript tail sits directly
-    // above it and the vacated rows end up below the band
-    assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4));
+    // the band was pinned to the screen bottom, so it stays pinned:
+    // it drops back down and the vacated rows open above it
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
     let screen = Screen::replay(&tape, W, 10);
     assert_eq!(screen.lines()[..4], rows(0..4)[..]);
-    assert_eq!(screen.lines()[4..8], band_rows(4)[..]);
-    assert!(screen.lines()[8..].iter().all(String::is_empty));
+    assert!(screen.lines()[4..6].iter().all(String::is_empty));
+    assert_eq!(screen.lines()[6..], band_rows(4)[..]);
     assert!(screen.scrollback.is_empty());
 }
 
 #[test]
-fn inserts_under_a_shrunk_band_push_it_down_without_scrolling() {
+fn inserts_under_a_shrunk_band_reclaim_the_vacated_rows() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);
     insert(&mut term, &["r0", "r1", "r2", "r3"]);
     band(&mut term, 6);
     band(&mut term, 4);
-    assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4));
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
 
-    // two rows are free below the band; two inserted rows push the band
-    // down into them without scrolling anything into scrollback
+    // two rows are free above the band; two inserted rows land in them
+    // without scrolling anything into scrollback
     let mark = tape.len();
     insert(&mut term, &["r4", "r5"]);
     assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
@@ -479,10 +479,11 @@ fn growth_past_the_vacated_rows_scrolls_only_the_overflow() {
     insert(&mut term, &refs);
     band(&mut term, 6);
     band(&mut term, 4);
-    // the band floats with two vacated rows below it
-    assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4));
+    // the band stayed pinned: it dropped back down and the two vacated
+    // rows are above it
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
 
-    // growth fills the free rows below the band first
+    // growth rises into the vacated rows first — no scroll yet
     let mark = tape.len();
     band(&mut term, 6);
     assert_eq!(term.viewport_area, Rect::new(0, 4, W, 6));
@@ -582,12 +583,12 @@ fn a_popup_on_a_full_screen_regrounds_the_band() {
     band(&mut term, 4);
     band(&mut term, 6);
     band(&mut term, 4);
-    assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4));
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
     let screen = Screen::replay(&tape, W, 10);
     assert_eq!(screen.scrollback, rows(0..2));
     assert_eq!(screen.lines()[..4], rows(2..6)[..]);
-    assert_eq!(screen.lines()[4..8], band_rows(4)[..]);
-    assert!(screen.lines()[8..].iter().all(String::is_empty));
+    assert!(screen.lines()[4..6].iter().all(String::is_empty));
+    assert_eq!(screen.lines()[6..], band_rows(4)[..]);
 
     insert(&mut term, &["r6", "r7", "r8"]);
     band(&mut term, 4);
@@ -652,10 +653,9 @@ fn a_busy_turn_does_not_tear_the_transcript() {
     }
 
     let screen = Screen::replay(&tape, W, 24);
-    let got = screen.transcript(17);
+    let got = screen.transcript(20);
     assert_eq!(trimmed(&got), expected.as_slice());
-    assert_eq!(screen.lines()[17..21], band_rows(4)[..]);
-    assert!(screen.lines()[21..].iter().all(String::is_empty));
+    assert_eq!(screen.lines()[20..24], band_rows(4)[..]);
 }
 
 #[test]
@@ -688,12 +688,8 @@ fn a_removed_live_tool_does_not_tear_the_box_below_it() {
         }
 
         let screen = Screen::replay(&tape, W, 24);
-        let got = screen.transcript(17);
+        let got = screen.transcript(20);
         assert_eq!(trimmed(&got), expected.as_slice(), "{scrollback:?}");
-        assert_eq!(screen.lines()[17..21], band_rows(4)[..], "{scrollback:?}");
-        assert!(
-            screen.lines()[21..].iter().all(String::is_empty),
-            "{scrollback:?}"
-        );
+        assert_eq!(screen.lines()[20..24], band_rows(4)[..], "{scrollback:?}");
     }
 }

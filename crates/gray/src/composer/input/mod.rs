@@ -262,6 +262,7 @@ pub(crate) fn read_line(
                     tui.matches.clear();
                     tui.sel = 0;
                     if tui.is_task_running {
+                        tui.push_user_prompt(&cmd, &[], false);
                         tui.queued_inputs.push_back((cmd, Vec::new()));
                         let _ = tui.draw();
                         continue;
@@ -291,6 +292,7 @@ pub(crate) fn read_line(
                     let attached: Vec<PathBuf> = std::mem::take(&mut tui.attachments);
                     tui.textarea.set_text("");
                     if tui.is_task_running {
+                        tui.push_user_prompt(&trimmed, &attached, !trimmed.starts_with('/'));
                         tui.queued_inputs
                             .push_back((trimmed.clone(), attached.clone()));
                         tui.matches.clear();
