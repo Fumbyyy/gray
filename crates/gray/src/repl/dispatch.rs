@@ -644,8 +644,9 @@ pub(crate) async fn dispatch_command(
                                 }
                                 if installed_plugin_names() != before {
                                     let sid = session_state.as_ref().map(|s| s.session_id.as_str());
-                                    reload_agent(agent, config, cwd, sid, shared).await;
-                                    say(shared, "plugins changed, reloaded");
+                                    if reload_agent(agent, config, cwd, sid, shared).await {
+                                        say(shared, "plugins changed, reloaded");
+                                    }
                                 }
                             }
                             _ => say(

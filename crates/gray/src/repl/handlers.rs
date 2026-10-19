@@ -484,7 +484,7 @@ pub(crate) async fn reload_agent(
     cwd: &Path,
     session_id: Option<&str>,
     tui: Option<&crate::composer::SharedTui>,
-) {
+) -> bool {
     let started = std::time::Instant::now();
     let old = agent.take();
     let mut rebuilt = match build_agent(config, cwd, session_id).await {
@@ -492,7 +492,7 @@ pub(crate) async fn reload_agent(
         Err(e) => {
             say(tui, &format!("{e}"));
             *agent = old;
-            return;
+            return false;
         }
     };
     if let Some(old) = old {
@@ -502,6 +502,7 @@ pub(crate) async fn reload_agent(
     rebuilt.refresh_tools();
     *agent = Some(rebuilt);
     log::debug!(target: "gray_timing", "reload_agent elapsed_ms={}", started.elapsed().as_millis());
+    true
 }
 
 pub(crate) async fn switch_agent_model(
