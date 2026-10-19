@@ -423,7 +423,16 @@ impl Tui {
     }
 
     pub(crate) fn tick_reveal(&mut self) {
-        if self.modal_open || self.reveal_buf.is_empty() {
+        if self.modal_open {
+            return;
+        }
+        if self.intro_started.is_some() {
+            // The baked intro runs at frame cadence, not at the 100ms status
+            // tick — redraw on every ticker pass or it looks like a slideshow.
+            let _ = self.draw();
+            return;
+        }
+        if self.reveal_buf.is_empty() {
             return;
         }
         let chars: Vec<char> = self.reveal_buf.chars().collect();

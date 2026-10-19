@@ -103,7 +103,13 @@ fn update_active_codes(active: &mut Vec<String>, chunk: &str) {
 
 pub fn print_wrapped(text: &str, pad: usize) {
     let width = crate::term_width().saturating_sub(pad);
+    let safe = unicode_safe();
     for line in wrap(text, width) {
+        let line = if safe {
+            line
+        } else {
+            ascii_symbol(&line).map_or(line, |s| s.into_owned())
+        };
         print!("\r{}{}\r\n", " ".repeat(pad), line);
     }
     let _ = std::io::stdout().flush();
@@ -126,6 +132,22 @@ fn modern_windows_terminal() -> bool {
         || var("ConEmuANSI").is_ok_and(|v| v == "ON")
 }
 
+/// Bare conhost only gained a text renderer with font fallback in Windows 11
+/// 22H2 (build 22621); before that, a glyph missing from the console font —
+/// braille patterns are missing from Consolas entirely — draws a box. Gate
+/// unicode art on bare consoles to builds that can actually shape it.
+#[cfg(windows)]
+fn console_font_fallback() -> bool {
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    let status = unsafe { RtlGetVersion(&mut info) };
+    status == 0 && info.dwBuildNumber >= 22621
+}
+
 pub fn unicode_safe() -> bool {
     match std::env::var("GRAY_ASCII_ART")
         .map(|v| v.trim().to_lowercase())
@@ -143,10 +165,107 @@ pub fn unicode_safe() -> bool {
     }
     #[cfg(windows)]
     {
-        return modern_windows_terminal();
+        return modern_windows_terminal() || (ansi_supported() && console_font_fallback());
     }
     #[allow(unreachable_code)]
     true
+}
+
+/// Density ramp for a braille cell: the intro and the spinners bake
+/// frames in braille space, so the ASCII path maps dots to a ramp.
+pub(crate) fn braille_fallback(ch: char) -> char {
+    if !('\u{2800}'..='\u{28ff}').contains(&ch) {
+        return ch;
+    }
+    match (ch as u32 - 0x2800).count_ones() {
+        0 => ' ',
+        1..=2 => '.',
+        3..=4 => '+',
+        _ => '#',
+    }
+}
+
+/// Map one decorative glyph to an ASCII stand-in. Returns None for ASCII
+/// and for characters we never emit decoratively — letters, accents, CJK,
+/// emoji — which pass through untouched: a CJK-locale console font has
+/// those glyphs, and mangling user content is worse than a fallback box.
+fn ascii_char(ch: char) -> Option<char> {
+    Some(match ch {
+        '\u{2800}'..='\u{28ff}' => braille_fallback(ch),
+        '─' | '━' | '═' | '╌' | '╍' | '⎯' | '⏤' | '╼' | '╾' => '-',
+        '│' | '┃' | '║' | '╎' | '╏' | '╽' | '╿' | '⌇' => '|',
+        '╱' => '/',
+        '╲' => '\\',
+        '╳' => 'x',
+        '\u{2500}'..='\u{257f}' => '+',
+        '░' | '▁' | '▂' => '.',
+        '▒' | '▃' | '▅' => ':',
+        '▓' | '▆' | '▇' => '*',
+        '▀' => '"',
+        '▄' => '_',
+        '\u{2580}'..='\u{259f}' => '#',
+        '○' | '◌' | '◍' | '◎' | '◇' | '□' | '▢' | '▫' | '▯' | '◯' | '⬡' => {
+            'o'
+        }
+        '●' | '◉' | '◆' | '◘' | '◙' => '*',
+        '■' | '▪' | '▮' | '⬢' => '#',
+        '▬' => '-',
+        '←' | '↢' | '↤' | '⇐' | '⇤' | '⇦' | '⇷' | '⇺' | '⇽' | '↩' | '↫' | '↶' | '↺' | '↵' | '⏎'
+        | '␍' | '↲' | '◀' | '◄' | '◂' | '◃' | '◁' | '⏴' | '⏮' | '⏪' => '<',
+        '→' | '↣' | '↦' | '⇒' | '⇥' | '⇨' | '⇻' | '⇾' | '➔' | '➜' | '➤' | '➥' | '↪' | '↬' | '↷'
+        | '↻' | '↳' | '⤷' | '⤳' | '▸' | '▹' | '▶' | '►' | '▻' | '⏵' | '⏩' | '⏭' | '‣' | '⏏' => {
+            '>'
+        }
+        '↑' | '↟' | '↥' | '⇑' | '⇧' | '⇪' | '⇫' | '⇬' | '⇭' | '⇮' | '⇯' | '⇡' | '↰' | '↱' | '▴'
+        | '▵' | '▲' | '△' | '⏶' | '⏫' | '⤒' => '^',
+        '↓' | '↡' | '↧' | '⇓' | '⇩' | '⇣' | '↴' | '▾' | '▿' | '▼' | '▽' | '⏷' | '⏬' | '⤓'
+        | '✓' | '✔' => 'v',
+        '↔' | '↮' | '↹' | '⇄' | '⇆' | '⇋' | '⇌' | '⇍' | '⇏' | '⇶' | '⇹' | '⇼' | '⇴' | '⇿' => {
+            '-'
+        }
+        '↕' | '↨' | '⇅' | '⇕' | '⇳' | '⇵' | '⇎' => '|',
+        '↗' | '⇗' => '/',
+        '↘' | '⇘' => '\\',
+        '↖' | '⇖' => '\\',
+        '↙' | '⇙' => '/',
+        '\u{2190}'..='\u{21ff}' | '\u{27f0}'..='\u{27ff}' | '\u{2900}'..='\u{297f}' => '>',
+        '✗' | '✘' | '✖' | '⨯' | '☓' | '✕' => 'x',
+        '❯' | '❱' => '>',
+        '⎿' | '⏊' | '⏉' | '⌐' | '⌜' | '⌝' | '⌞' | '⌟' | '⌈' | '⌉' | '⌊' | '⌋' => {
+            '-'
+        }
+        '␣' => '_',
+        '⚠' | '⚡' | '❗' | '❕' | '‼' => '!',
+        '❓' | '❔' => '?',
+        '⌘' | '⌥' | '⏻' | '⏼' | '⏽' | '⏾' | '⭘' => '*',
+        '\u{2300}'..='\u{23ff}' => '*',
+        '\u{25a0}'..='\u{25ff}' => '*',
+        '\u{2600}'..='\u{26ff}' => '*',
+        '\u{2700}'..='\u{27bf}' => '*',
+        '\u{2b00}'..='\u{2bff}' => '*',
+        _ => return None,
+    })
+}
+
+/// Transliterate a cell's symbol for consoles that cannot shape decorative
+/// glyphs (bare Windows 10 conhost fonts carry no braille or dingbats at
+/// all). Returns the replacement, or None to leave the symbol as written —
+/// plain ASCII, Latin-1 punctuation, CJK, emoji, and control sequences
+/// (hyperlinks, kitty placeholders) all pass through untouched.
+pub(crate) fn ascii_symbol(symbol: &str) -> Option<std::borrow::Cow<'static, str>> {
+    if symbol.is_ascii() || symbol.starts_with('\x1b') {
+        return None;
+    }
+    if !symbol.chars().any(|ch| ascii_char(ch).is_some()) {
+        return None;
+    }
+    Some(
+        symbol
+            .chars()
+            .map(|ch| ascii_char(ch).unwrap_or(ch))
+            .collect::<String>()
+            .into(),
+    )
 }
 
 pub(crate) fn arrow_glyph() -> &'static str {
@@ -231,3 +350,7 @@ pub fn clear_screen() {
         let _ = std::io::stdout().flush();
     }
 }
+
+#[path = "tui_tests.rs"]
+#[cfg(test)]
+mod tests;

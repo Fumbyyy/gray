@@ -5,9 +5,13 @@ pub fn should_use_external_editor(editor: Option<&str>) -> bool {
 }
 
 fn editor_program(editor: Option<&str>) -> &str {
+    #[cfg(windows)]
+    const FALLBACK: &str = "notepad";
+    #[cfg(not(windows))]
+    const FALLBACK: &str = "vi";
     editor
         .filter(|e| should_use_external_editor(Some(e)))
-        .unwrap_or("vi")
+        .unwrap_or(FALLBACK)
 }
 
 pub fn split_editor_words(editor: &str) -> Vec<String> {

@@ -531,13 +531,11 @@ fn dots_braille(dots: &std::collections::BTreeSet<(usize, usize)>) -> Vec<String
 
 fn intro_settle_frames(from: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
     let (cx, cy) = MARK_CELLS;
-    let safe = crate::tui::unicode_safe();
-    let src = if safe {
-        crate::tui::LOGO
-    } else {
-        crate::tui::LOGO_ASCII
-    };
-    let blank = if safe { '\u{2800}' } else { ' ' };
+    // Settle math stays in braille space on every terminal: the render pass
+    // maps cells to an ASCII ramp when unicode is unsafe, and LOGO_ASCII rows
+    // carry no dot data for braille_dots() to settle toward.
+    let src = crate::tui::LOGO;
+    let blank = '\u{2800}';
     let mut target: Vec<String> = src
         .lines()
         .map(|l| {
@@ -659,6 +657,7 @@ pub(crate) fn welcome_body_lines_at(
     let l_cols = (max_logo_w as f32).max(1.0);
     let logo_pad = x + col_w.saturating_sub(max_logo_w) / 2;
 
+    let safe = crate::tui::unicode_safe();
     for (row, line) in mark_rows.iter().enumerate() {
         let edge = edge_rows.get(row).map(String::as_str).unwrap_or("");
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -666,7 +665,12 @@ pub(crate) fn welcome_body_lines_at(
             spans.push(Span::raw(" ".repeat(logo_pad)));
         }
         for (col, ch) in line.chars().enumerate() {
-            if ch.is_whitespace() {
+            let ch = if safe {
+                ch
+            } else {
+                crate::tui::braille_fallback(ch)
+            };
+            if ch.is_whitespace() || ch == ' ' {
                 spans.push(Span::raw(" "));
                 continue;
             }
@@ -690,7 +694,6 @@ pub(crate) fn welcome_body_lines_at(
             Style::default().bold().fg(theme.text_bright),
         )],
     };
-    let safe = crate::tui::unicode_safe();
     title.push(Span::raw(" "));
     if safe {
         title.push(Span::styled(
@@ -1813,5 +1816,9 @@ mod palette_tests;
 #[path = "mod_fresh_conversation_tests.rs"]
 #[cfg(test)]
 mod fresh_conversation_tests;
+
+#[path = "mod_intro_tests.rs"]
+#[cfg(test)]
+mod intro_tests;
 
 mod background;

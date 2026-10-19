@@ -409,9 +409,15 @@ pub async fn update_now() -> anyhow::Result<()> {
         Ok(_) => {}
         Err(e) => log::debug!("version check failed ({e:#}); installing anyway"),
     }
-    println!("→ updating gray ({CHANNEL})...");
+    println!(
+        "{} updating gray ({CHANNEL})...",
+        crate::tui::glyph("→", ">")
+    );
     install()?;
-    println!("✓ updated. restart gray to use the new version.");
+    println!(
+        "{} updated. restart gray to use the new version.",
+        crate::tui::glyph("✓", "v")
+    );
     warn_on_shadow();
     Ok(())
 }
@@ -531,7 +537,10 @@ pub async fn startup_check() {
     if confirm() {
         match run_installer_locked() {
             Ok(()) => {
-                println!("✓ updated. restart gray to use {latest}.");
+                println!(
+                    "{} updated. restart gray to use {latest}.",
+                    crate::tui::glyph("✓", "v")
+                );
                 warn_on_shadow();
                 std::process::exit(0);
             }

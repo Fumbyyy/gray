@@ -871,10 +871,11 @@ pub(crate) fn dispatch_agent_event(
                 }
             }
             AgentEvent::StreamError { message, details } => {
+                let mark = crate::tui::glyph("⚠", "!");
                 if details.is_empty() {
-                    eprintln!("\n\x1b[2m⚠ {message}\x1b[0m");
+                    eprintln!("\n\x1b[2m{mark} {message}\x1b[0m");
                 } else {
-                    eprintln!("\n\x1b[2m⚠ {message}\n  {details}\x1b[0m");
+                    eprintln!("\n\x1b[2m{mark} {message}\n  {details}\x1b[0m");
                 }
             }
             AgentEvent::Compacted {
