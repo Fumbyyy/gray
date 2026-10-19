@@ -335,6 +335,7 @@ impl Gray {
             self.key("ctrl+a");
             self.key("BackSpace");
             self.type_text(query);
+            sleep(Duration::from_millis(400));
         }
         assert_eq!(self.state()["palette_query"], query);
         for _ in 0..12 {
