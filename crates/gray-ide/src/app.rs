@@ -1,9 +1,13 @@
 use crate::git;
 use crate::graycmds;
+use crate::inbox;
+use crate::ledger;
 use crate::plugins::{self, HubEntry, Installed, PluginMsg};
 use crate::provider::{self, MODES, PROVIDERS, ProviderEvent, Turn, TurnRequest};
+use crate::pty;
 use crate::sessions::{self, GraySession};
-use crate::store::{Event, Item, Role, Store, new_id, now};
+use crate::store::{self, Event, Item, Role, Store, new_id, now};
+use crate::usage;
 use crate::workspace::{self, FileEntry};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::diff::{Diff, DiffFile, DiffState};
@@ -17,6 +21,8 @@ use gpui_kit::component::{
 use gpui_kit::component::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+
+use gpui_kit::assets::IconName as LIcon;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -45,7 +51,10 @@ actions!(
         FocusComposer,
         EffortPicker,
         TogglePluginsPanel,
-        ToggleViewer
+        ToggleViewer,
+        NewTask,
+        ToggleReview,
+        ToggleInbox
     ]
 );
 
@@ -70,6 +79,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-e", EffortPicker, None),
         KeyBinding::new("ctrl-shift-p", TogglePluginsPanel, None),
         KeyBinding::new("ctrl-shift-v", ToggleViewer, None),
+        KeyBinding::new("ctrl-shift-n", NewTask, None),
+        KeyBinding::new("ctrl-shift-i", ToggleReview, None),
+        KeyBinding::new("ctrl-shift-b", ToggleInbox, None),
+        KeyBinding::new("ctrl-`", ToggleTerminal, None),
     ]);
 }
 
@@ -81,6 +94,8 @@ enum Panel {
     Viewer,
     Sessions,
     Skills,
+    Review,
+    Inbox,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -130,6 +145,17 @@ enum Cmd {
     ToggleSkills,
     UseSkill(String),
     ResumeSession(String),
+    ToggleReview,
+    ToggleInbox,
+    NewTask,
+    LauncherGo,
+    ApproveAlways,
+    RestoreTree(String),
+    DiffTree(String),
+    CommitAll,
+    UndoRestore,
+    ClearQueue,
+    TermLine(String),
     DiscardChanges,
     Gray(String),
     TurnDiff,
@@ -173,8 +199,6 @@ pub struct GrayApp {
     show_archived: bool,
     panel: Option<Panel>,
     turns: HashMap<String, ActiveTurn>,
-    terminal_lines: Vec<String>,
-    terminal_rx: Vec<Receiver<String>>,
     scroll: ScrollHandle,
     expanded: HashSet<String>,
     tree: Vec<FileEntry>,
@@ -202,12 +226,30 @@ pub struct GrayApp {
     ticks: u64,
     window_handle: Option<gpui::AnyWindowHandle>,
     pending_cmds: Vec<String>,
+    /// Queued messages waiting to be delivered to their owning thread
+    /// `(thread_id, text)` once that thread's turn finishes.
+    pending_sends: Vec<(String, String)>,
     hub: Vec<HubEntry>,
     hub_error: Option<String>,
     installed: Vec<Installed>,
     plugin_busy: Option<String>,
     plugin_tx: Sender<PluginMsg>,
     plugin_rx: Receiver<PluginMsg>,
+    pty: Option<pty::Pty>,
+    pty_cwd: Option<PathBuf>,
+    pty_focus: FocusHandle,
+    pty_refresh_at: Option<Instant>,
+    queue: inbox::MessageQueue,
+    unread: HashSet<String>,
+    launcher_open: bool,
+    launcher_input: Entity<InputState>,
+    launcher_worktree: Entity<InputState>,
+    launcher_wt: bool,
+    restore_undo: Option<String>,
+    inbox_collapsed: bool,
+    /// Checkpoint tree hash -> changed-file count, for the review desk.
+    /// Recomputed in `refresh_workspace` so renders don't shell out to git.
+    review_files: HashMap<String, usize>,
 }
 
 impl GrayApp {
@@ -229,6 +271,10 @@ impl GrayApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("Run a shell command"));
         let settings_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        let launcher_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Describe the task for the agent"));
+        let launcher_worktree =
+            cx.new(|cx| InputState::new(window, cx).placeholder("worktree name (optional)"));
 
         let mut subs = Vec::new();
         subs.push(
@@ -269,7 +315,25 @@ impl GrayApp {
                 if let InputEvent::PressEnter { .. } = ev {
                     let cmd = state.read(cx).value().to_string();
                     state.update(cx, |s, cx| s.set_value("", window, cx));
-                    this.run_terminal(cmd, cx);
+                    this.pty_send_line(&cmd, cx);
+                }
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &launcher_input,
+            window,
+            |this, _state, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    this.run(Cmd::LauncherGo, window, cx);
+                }
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &launcher_worktree,
+            window,
+            |this, _state, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    this.run(Cmd::LauncherGo, window, cx);
                 }
             },
         ));
@@ -296,8 +360,6 @@ impl GrayApp {
             show_archived: false,
             panel: None,
             turns: HashMap::new(),
-            terminal_lines: Vec::new(),
-            terminal_rx: Vec::new(),
             scroll: ScrollHandle::new(),
             expanded: HashSet::new(),
             tree: Vec::new(),
@@ -314,6 +376,7 @@ impl GrayApp {
             gray_cmd_rx,
             window_handle: None,
             pending_cmds: Vec::new(),
+            pending_sends: Vec::new(),
             active_tab: None,
             diff: None,
             diff_base: None,
@@ -331,6 +394,19 @@ impl GrayApp {
             plugin_busy: None,
             plugin_tx,
             plugin_rx,
+            pty: None,
+            pty_cwd: None,
+            pty_focus: cx.focus_handle(),
+            pty_refresh_at: None,
+            queue: inbox::MessageQueue::default(),
+            unread: HashSet::new(),
+            launcher_open: false,
+            launcher_input,
+            launcher_worktree,
+            launcher_wt: false,
+            restore_undo: None,
+            inbox_collapsed: false,
+            review_files: HashMap::new(),
         };
         if let Some(path) = initial {
             app.add_project(&path);
@@ -412,6 +488,7 @@ impl GrayApp {
     }
 
     fn refresh_workspace(&mut self, cx: &mut Context<Self>) {
+        self.review_files.clear();
         let Some(root) = self.work_root() else {
             self.tree.clear();
             self.branch = None;
@@ -438,6 +515,22 @@ impl GrayApp {
             } else {
                 Some(cx.new(|cx| DiffState::new(files, cx)))
             };
+            // File counts per checkpoint cost ~2 git spawns each, so they
+            // are only computed while the Review desk is visible.
+            if self.panel == Some(Panel::Review)
+                && let Some(th) = self
+                    .active_thread
+                    .as_ref()
+                    .and_then(|id| self.store.state.thread(id))
+            {
+                for cp in ledger::turn_spans(th)
+                    .into_iter()
+                    .filter_map(|s| s.checkpoint)
+                {
+                    self.review_files
+                        .insert(cp.clone(), ledger::files_from(&root, &cp).len());
+                }
+            }
         } else {
             self.branch = None;
             self.branches.clear();
@@ -506,13 +599,78 @@ impl GrayApp {
                 None => return,
             },
         };
+        // The message was accepted (sent, steered, or queued) — clear the
+        // composer so it isn't accidentally sent twice.
+        self.composer
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.send_text(&tid, &text, root, cx);
+    }
+
+    /// Send `text` to a specific thread — steered into its running turn,
+    /// queued behind it, or starting a fresh turn. Unlike `send`, the
+    /// thread need not be active; its workspace root is resolved from
+    /// the thread's own project/worktree so drained queue messages can't
+    /// land on whatever thread happens to be in focus.
+    fn send_to_thread(&mut self, tid: &str, text: String, cx: &mut Context<Self>) {
+        let Some(root) = self.thread_root(tid) else {
+            self.toast("Queued message dropped — thread's project is gone", true);
+            cx.notify();
+            return;
+        };
+        self.send_text(tid, &text, root, cx);
+    }
+
+    /// The workspace root for `tid`: its worktree if set, else its
+    /// project's path. Independent of which thread is active.
+    fn thread_root(&self, tid: &str) -> Option<PathBuf> {
+        let t = self.store.state.thread(tid)?;
+        if let Some(w) = &t.worktree {
+            return Some(PathBuf::from(w));
+        }
+        self.store
+            .state
+            .project(&t.project_id)
+            .map(|p| PathBuf::from(&p.path))
+    }
+
+    fn send_text(&mut self, tid: &str, text: &str, root: PathBuf, cx: &mut Context<Self>) {
+        let tid = tid.to_string();
         if self.turns.contains_key(&tid) {
-            self.toast("A turn is already running in this thread", true);
+            let provider = self.store.state.thread(&tid).map(|t| t.provider.clone());
+            let mut prompt = expand_mentions(text, &root);
+            for a in &self.attachments {
+                prompt.push_str(&format!("\n[Attached image: {}]", a.display()));
+            }
+            let attachments = std::mem::take(&mut self.attachments);
+            let steered = provider.as_deref() == Some("gray")
+                && self
+                    .turns
+                    .get(&tid)
+                    .is_some_and(|t| t.turn.steer(&prompt).is_ok());
+            if steered {
+                // Delivered now — record it. Queued messages are persisted
+                // when they are actually sent, not when enqueued.
+                self.persist(Event::MessageAdded {
+                    thread_id: tid.clone(),
+                    id: new_id(),
+                    role: Role::User,
+                    text: text.to_string(),
+                    at: now(),
+                });
+                self.toast("Steered message into running turn", false);
+            } else {
+                // Bake attachment references into the stored text so they
+                // aren't silently dropped while the message waits.
+                let mut stored = text.to_string();
+                for a in &attachments {
+                    stored.push_str(&format!("\n[Attached image: {}]", a.display()));
+                }
+                self.queue.push(&tid, stored);
+                self.toast("Queued — sent when the turn finishes", false);
+            }
             cx.notify();
             return;
         }
-        self.composer
-            .update(cx, |s, cx| s.set_value("", window, cx));
         let thread = self.store.state.thread(&tid).cloned();
         let Some(thread) = thread else { return };
         if thread.title == "New thread" {
@@ -538,10 +696,10 @@ impl GrayApp {
             thread_id: tid.clone(),
             id: new_id(),
             role: Role::User,
-            text: text.clone(),
+            text: text.to_string(),
             at: now(),
         });
-        let mut prompt = expand_mentions(&text, &root);
+        let mut prompt = expand_mentions(text, &root);
         for a in &self.attachments {
             prompt.push_str(&format!("\n[Attached image: {}]", a.display()));
         }
@@ -588,6 +746,7 @@ impl GrayApp {
             "checkout" => Cmd::Branch(arg),
             "diff" => Cmd::ToggleDiff,
             "terminal" => Cmd::ToggleTerminal,
+            "term" | "exec" => Cmd::TermLine(arg),
             "settings" => {
                 if arg.is_empty() {
                     Cmd::Settings
@@ -624,6 +783,12 @@ impl GrayApp {
             "reject" => Cmd::Approve(false),
             "turndiff" | "changes" => Cmd::TurnDiff,
             "headdiff" => Cmd::HeadDiff,
+            "files" => Cmd::ToggleFiles,
+            "viewer" => Cmd::ToggleViewer,
+            "inbox" => Cmd::ToggleInbox,
+            "review" => Cmd::ToggleReview,
+            "launch" | "task" => Cmd::NewTask,
+            "usage" => Cmd::SettingsSection("usage".into()),
             _ => {
                 self.toast(format!("Unknown command /{name}"), true);
                 cx.notify();
@@ -652,6 +817,7 @@ impl GrayApp {
         let mut activities: Vec<(String, String, String, String)> = Vec::new();
         let mut sessions: Vec<(String, String)> = Vec::new();
         let mut approvals: Vec<(String, String)> = Vec::new();
+        let mut usages: Vec<(String, u64, u64, u64, u64, u64)> = Vec::new();
         for (tid, active) in self.turns.iter_mut() {
             loop {
                 match active.turn.rx.try_recv() {
@@ -674,6 +840,23 @@ impl GrayApp {
                     Ok(ProviderEvent::Session(sid)) => sessions.push((tid.clone(), sid)),
                     Ok(ProviderEvent::Approval { label }) => {
                         approvals.push((tid.clone(), label));
+                        changed = true;
+                    }
+                    Ok(ProviderEvent::Usage {
+                        input,
+                        output,
+                        total,
+                        cost_micros,
+                        requests,
+                    }) => {
+                        usages.push((
+                            tid.clone(),
+                            input,
+                            output,
+                            total,
+                            cost_micros.unwrap_or(0),
+                            requests.unwrap_or(0),
+                        ));
                         changed = true;
                     }
                     Ok(ProviderEvent::Done) => {
@@ -730,6 +913,17 @@ impl GrayApp {
                 });
             }
         }
+        for (tid, input, output, total, cost_micros, requests) in usages {
+            self.persist(Event::UsageAdded {
+                thread_id: tid,
+                input,
+                output,
+                total,
+                cost_micros,
+                requests,
+                at: now(),
+            });
+        }
         for (tid, kind, label, detail) in activities {
             self.persist(Event::ActivityAdded {
                 thread_id: tid,
@@ -771,10 +965,18 @@ impl GrayApp {
                 }
             };
             self.persist(Event::TurnFinished {
-                thread_id: tid,
+                thread_id: tid.clone(),
                 status,
                 at: now(),
             });
+            if self.active_thread.as_deref() != Some(tid.as_str()) {
+                self.unread.insert(tid.clone());
+            }
+            if let Some(next) = self.queue.pop(&tid) {
+                // Keep the thread id — the message belongs to `tid`, not
+                // to whatever thread happens to be active when it drains.
+                self.pending_sends.push((tid, next));
+            }
             self.refresh_workspace(cx);
         }
         while let Ok(cmds) = self.gray_cmd_rx.try_recv() {
@@ -799,35 +1001,26 @@ impl GrayApp {
                 }
             }
         }
-        if !self.terminal_rx.is_empty() {
-            let mut i = 0;
-            while i < self.terminal_rx.len() {
-                let mut closed = false;
-                loop {
-                    match self.terminal_rx[i].try_recv() {
-                        Ok(line) => {
-                            self.terminal_lines.push(line);
-                            changed = true;
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            closed = true;
-                            break;
-                        }
-                    }
-                }
-                if closed {
-                    self.terminal_rx.remove(i);
-                    self.refresh_workspace(cx);
-                    changed = true;
-                } else {
-                    i += 1;
-                }
+        if let Some(p) = &self.pty {
+            if p.dirty() {
+                p.clear_dirty();
+                changed = true;
+                // Terminal output can mean files changed; refresh the tree
+                // once output settles (the pty has no exit-per-command signal).
+                self.pty_refresh_at = Some(Instant::now() + Duration::from_millis(800));
             }
-            if self.terminal_lines.len() > 2000 {
-                let cut = self.terminal_lines.len() - 2000;
-                self.terminal_lines.drain(..cut);
+            if p.is_exited() {
+                self.pty = None;
+                self.pty_cwd = None;
+                changed = true;
             }
+        }
+        if let Some(at) = self.pty_refresh_at
+            && at <= Instant::now()
+        {
+            self.pty_refresh_at = None;
+            self.refresh_workspace(cx);
+            changed = true;
         }
         if changed {
             self.scroll.scroll_to_bottom();
@@ -835,22 +1028,52 @@ impl GrayApp {
         }
     }
 
-    fn run_terminal(&mut self, cmd: String, cx: &mut Context<Self>) {
-        let cmd = cmd.trim().to_string();
-        if cmd.is_empty() {
-            return;
-        }
-        if cmd == "clear" {
-            self.terminal_lines.clear();
-            cx.notify();
-            return;
-        }
+    fn ensure_pty(&mut self) {
         let Some(root) = self.work_root() else {
             return;
         };
-        self.terminal_lines.push(format!("$ {cmd}"));
-        self.terminal_rx.push(workspace::run_shell(&root, &cmd));
-        cx.notify();
+        let stale = self.pty_cwd.as_ref().map(|c| c != &root).unwrap_or(true)
+            || self.pty.as_ref().map(|p| p.is_exited()).unwrap_or(true);
+        if stale {
+            // cmd.exe/powershell can't cd into \\?\ extended-length paths.
+            let spawn_root = dunce_root(&root);
+            self.pty = pty::Pty::spawn(&spawn_root, None, 120, 30).ok();
+            self.pty_cwd = Some(root);
+        }
+    }
+
+    fn pty_write(&mut self, data: &[u8], cx: &mut Context<Self>) {
+        self.ensure_pty();
+        if let Some(p) = &self.pty {
+            p.write(data);
+            cx.notify();
+        }
+    }
+
+    fn pty_send_line(&mut self, cmd: &str, cx: &mut Context<Self>) {
+        let cmd = cmd.trim();
+        if cmd.is_empty() {
+            self.pty_write(b"\r", cx);
+            return;
+        }
+        if cmd == "clear" {
+            // cmd.exe doesn't clear on ^L; `cls` works there and in
+            // PowerShell. ^L reaches readline on unix shells.
+            let seq: &[u8] = if cfg!(windows) { b"cls\r" } else { b"\x0c" };
+            self.pty_write(seq, cx);
+            return;
+        }
+        self.pty_write(format!("{cmd}\r").as_bytes(), cx);
+    }
+
+    fn run_terminal(&mut self, cmd: String, cx: &mut Context<Self>) {
+        if self.work_root().is_none() {
+            self.toast("Add a project first", true);
+            cx.notify();
+            return;
+        }
+        self.terminal_open = true;
+        self.pty_send_line(&cmd, cx);
     }
 
     fn open_palette(
@@ -897,6 +1120,11 @@ impl GrayApp {
         }
         let k = |s: &str| s.to_string();
         items.push((k("New thread"), k("Ctrl+N"), Cmd::NewThread));
+        items.push((k("New task (launcher)"), k("Ctrl+Shift+N"), Cmd::NewTask));
+        items.push((k("Review desk"), k("Ctrl+Shift+I"), Cmd::ToggleReview));
+        items.push((k("Inbox"), k("Ctrl+Shift+B"), Cmd::ToggleInbox));
+        items.push((k("Clear queued messages"), k("Thread"), Cmd::ClearQueue));
+        items.push((k("Commit all changes"), k("Git"), Cmd::CommitAll));
         items.push((k("Toggle sidebar"), k("Ctrl+B"), Cmd::ToggleSidebar));
         items.push((k("Toggle terminal"), k("Ctrl+J"), Cmd::ToggleTerminal));
         items.push((k("Toggle diff panel"), k("Ctrl+D"), Cmd::ToggleDiff));
@@ -1188,7 +1416,8 @@ impl GrayApp {
 
     fn run(&mut self, cmd: Cmd, window: &mut Window, cx: &mut Context<Self>) {
         self.palette_open = false;
-        let opening_terminal = matches!(cmd, Cmd::ToggleTerminal) && !self.terminal_open;
+        let opening_terminal = matches!(cmd, Cmd::ToggleTerminal | Cmd::TermLine(_) | Cmd::Gray(_))
+            && !self.terminal_open;
         let opening_file = matches!(cmd, Cmd::OpenFile(_));
         match cmd {
             Cmd::NewThread => {
@@ -1347,8 +1576,19 @@ impl GrayApp {
                 }
             }
             Cmd::Gray(name) => {
+                // Command names come from `gray cmd list` (plugin-provided
+                // strings) and land on a shell command line in the pty —
+                // restrict to a safe charset and quote it regardless.
+                let safe = !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.' | '/' | '@'));
+                if !safe {
+                    self.toast(format!("Refusing to run unsafe command name '{name}'"), true);
+                    return;
+                }
                 self.terminal_open = true;
-                self.run_terminal(format!("{} cmd run {name}", graycmds::bin()), cx);
+                self.run_terminal(format!("{} cmd run \"{name}\"", graycmds::bin()), cx);
             }
             Cmd::DiscardChanges => {
                 let before = self.tabs.len();
@@ -1509,6 +1749,11 @@ impl GrayApp {
                     .threads_for(&id, false)
                     .first()
                     .map(|t| t.id.clone());
+                // Unread marks survive until their thread is actually
+                // opened — the auto-selected thread counts as viewed.
+                if let Some(t) = self.active_thread.clone() {
+                    self.unread.remove(&t);
+                }
                 self.tabs.clear();
                 self.active_tab = None;
                 self.refresh_workspace(cx);
@@ -1518,6 +1763,7 @@ impl GrayApp {
                     self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
                     return;
                 }
+                self.unread.remove(&id);
                 self.active_thread = Some(id);
                 self.tabs.clear();
                 self.active_tab = None;
@@ -1722,8 +1968,140 @@ impl GrayApp {
                     }
                 }
             }
+            Cmd::ToggleReview => {
+                self.panel = if self.panel == Some(Panel::Review) {
+                    None
+                } else {
+                    Some(Panel::Review)
+                };
+                if self.panel == Some(Panel::Review) {
+                    self.refresh_workspace(cx);
+                }
+            }
+            Cmd::ToggleInbox => {
+                self.panel = if self.panel == Some(Panel::Inbox) {
+                    None
+                } else {
+                    Some(Panel::Inbox)
+                };
+            }
+            Cmd::NewTask => {
+                self.launcher_open = true;
+                self.palette_open = false;
+                self.settings_open = false;
+                self.launcher_wt = false;
+                self.launcher_worktree
+                    .update(cx, |s, cx| s.set_value("", window, cx));
+                self.launcher_input.update(cx, |s, cx| {
+                    s.set_value("", window, cx);
+                    s.focus(window, cx);
+                });
+            }
+            Cmd::LauncherGo => {
+                let prompt = self.launcher_input.read(cx).value().trim().to_string();
+                let wt_name = self.launcher_worktree.read(cx).value().trim().to_string();
+                self.launcher_open = false;
+                let Some(tid) = self.create_thread(cx) else {
+                    return;
+                };
+                if self.launcher_wt
+                    && !wt_name.is_empty()
+                    && let Some(root) = self.project_path()
+                {
+                    if !valid_worktree_name(&wt_name) {
+                        self.toast(
+                            format!(
+                                "Invalid worktree name '{wt_name}' — letters, digits, '.', '_', '-' only"
+                            ),
+                            true,
+                        );
+                    } else {
+                        let base = root
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let dir = root
+                            .parent()
+                            .unwrap_or(&root)
+                            .join(format!("{base}-worktrees"))
+                            .join(&wt_name);
+                        match git::worktree_add(&root, &dir, &wt_name) {
+                            Ok(()) => {
+                                self.persist(Event::ThreadWorktree {
+                                    id: tid.clone(),
+                                    path: dir.display().to_string(),
+                                });
+                                self.refresh_workspace(cx);
+                            }
+                            Err(e) => self.toast(e, true),
+                        }
+                    }
+                }
+                if !prompt.is_empty() {
+                    self.composer
+                        .update(cx, |s, cx| s.set_value(prompt, window, cx));
+                    self.send(window, cx);
+                }
+            }
+            Cmd::ApproveAlways => {
+                self.persist(Event::SettingChanged {
+                    key: "auto_accept".into(),
+                    value: "true".into(),
+                });
+                self.run(Cmd::Approve(true), window, cx);
+            }
+            Cmd::DiffTree(tree) => {
+                self.diff_base = Some(tree);
+                self.panel = Some(Panel::Diff);
+                self.refresh_workspace(cx);
+            }
+            Cmd::RestoreTree(tree) => {
+                if self.dirty_tabs(cx) > 0 {
+                    self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                    return;
+                }
+                if let Some(root) = self.work_root() {
+                    match ledger::restore_to(&root, &tree) {
+                        Ok(undo) => {
+                            self.restore_undo = undo;
+                            self.toast("Restored checkpoint", false);
+                        }
+                        Err(e) => self.toast(e, true),
+                    }
+                    self.refresh_workspace(cx);
+                    self.reload_tabs(window, cx);
+                }
+            }
+            Cmd::UndoRestore => {
+                if let (Some(root), Some(tree)) = (self.work_root(), self.restore_undo.take()) {
+                    match git::restore(&root, &tree) {
+                        Ok(()) => self.toast("Restore undone", false),
+                        Err(e) => self.toast(e, true),
+                    }
+                    self.refresh_workspace(cx);
+                    self.reload_tabs(window, cx);
+                }
+            }
+            Cmd::CommitAll => {
+                if let Some(root) = self.work_root() {
+                    match ledger::commit_all(&root, "gray-ide: agent changes") {
+                        Ok(hash) => {
+                            self.restore_undo = None;
+                            self.toast(format!("Committed {hash}"), false);
+                        }
+                        Err(e) => self.toast(e, true),
+                    }
+                    self.refresh_workspace(cx);
+                }
+            }
+            Cmd::ClearQueue => {
+                self.queue.clear_all();
+                self.toast("Cleared queued messages", false);
+            }
+            Cmd::TermLine(c) => self.run_terminal(c, cx),
         }
         if opening_terminal {
+            self.ensure_pty();
             self.terminal_input.update(cx, |s, cx| s.focus(window, cx));
         } else if !self.settings_open && !opening_file {
             self.composer.update(cx, |s, cx| s.focus(window, cx));
@@ -1904,7 +2282,7 @@ impl GrayApp {
             "gray_sessions": self.gray_sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
             "project": self.active_project.as_ref().and_then(|p| self.store.state.project(p)).map(|p| serde_json::json!({"name": p.name, "path": p.path})),
             "projects": self.store.state.projects.len(),
-            "thread": thread.map(|t| serde_json::json!({"id": t.id, "title": t.title, "provider": t.provider, "model": t.model, "mode": t.mode, "pinned": t.pinned, "settled": t.settled, "snoozed": t.snoozed_until > now(), "worktree": t.worktree, "effort": t.effort, "session": t.session.as_ref().map(|s| s.1.clone())})),
+            "thread": thread.map(|t| serde_json::json!({"id": t.id, "title": t.title, "provider": t.provider, "model": t.model, "mode": t.mode, "pinned": t.pinned, "settled": t.settled, "snoozed": t.snoozed_until > now(), "worktree": t.worktree, "effort": t.effort, "session": t.session.as_ref().map(|s| s.1.clone()), "usage_total": t.usage.total})),
             "threads": threads,
             "messages": messages,
             "activities": activities,
@@ -1926,13 +2304,21 @@ impl GrayApp {
             "pane_sizes": self.pane_sizes,
             "attachments": self.attachments.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "skills": self.skills.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
-            "terminal": self.terminal_lines.iter().rev().take(40).rev().cloned().collect::<Vec<_>>(),
+            "terminal": self.pty.as_ref().map(|p| p.text().into_iter().rev().take(40).rev().collect::<Vec<_>>()).unwrap_or_default(),
             "composer": self.composer.read(cx).value().to_string(),
             "toast": self.toast.as_ref().map(|t| t.0.clone()),
             "hub": self.hub.iter().map(|h| h.name.clone()).collect::<Vec<_>>(),
             "hub_error": self.hub_error,
             "plugins": self.installed.iter().map(|p| serde_json::json!({"name": p.name, "version": p.version, "enabled": p.enabled})).collect::<Vec<_>>(),
             "plugin_busy": self.plugin_busy,
+            "unread": self.unread.iter().cloned().collect::<Vec<_>>(),
+            "queue_len": self.active_thread.as_ref().map(|t| self.queue.len(t)).unwrap_or(0),
+            "pty_lines": self.pty.as_ref().map(|p| p.text().into_iter().rev().take(30).rev().collect::<Vec<_>>()).unwrap_or_default(),
+            "pty_alive": self.pty.as_ref().map(|p| !p.is_exited()).unwrap_or(false),
+            "launcher_open": self.launcher_open,
+            "review_spans": thread.map(|t| ledger::turn_spans(t).len()).unwrap_or(0),
+            "usage_total": usage::grand_total(&self.store.state).total,
+            "restore_undo": self.restore_undo,
         });
         let s = snap.to_string();
         if s != self.last_snapshot {
@@ -1948,6 +2334,31 @@ impl GrayApp {
             self.last_snapshot = s;
         }
     }
+}
+
+/// Strip the `\\?\` extended-length prefix that path canonicalization
+/// adds on Windows — cmd.exe can't cd into those paths.
+fn dunce_root(p: &Path) -> std::path::PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        // \\?\UNC\server\share -> \\server\share
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(unc) => std::path::PathBuf::from(format!(r"\\{unc}")),
+            None => std::path::PathBuf::from(rest),
+        },
+        None => p.to_path_buf(),
+    }
+}
+
+/// Worktree names double as a git branch name and a directory component;
+/// restrict to a strict subset that is a valid branch and can't traverse
+/// out of the worktrees directory (no separators, `..`, or leading `-`/`.`).
+fn valid_worktree_name(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with(['-', '.'])
+        && !s.contains("..")
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn fuzzy(hay: &str, needle: &str) -> bool {
@@ -2008,7 +2419,7 @@ fn provider_chip(
 
 fn chip(
     id: impl Into<ElementId>,
-    icon: IconName,
+    icon: impl gpui_kit::component::IconNamed + 'static,
     label: impl Into<SharedString>,
     cx: &App,
 ) -> Stateful<Div> {
@@ -2199,6 +2610,102 @@ impl GrayApp {
             .overflow_y_scroll()
             .px_2()
             .gap_0p5();
+        let running: HashSet<String> = self.turns.keys().cloned().collect();
+        let blocked: HashSet<String> = self
+            .pending_approval
+            .as_ref()
+            .map(|(tid, _)| tid.clone())
+            .into_iter()
+            .collect();
+        let attention =
+            inbox::attention(&self.store.state, &running, &blocked, &self.unread, now());
+        if !attention.is_empty() {
+            let collapsed = self.inbox_collapsed;
+            list = list.child(
+                h_flex()
+                    .id("attention-header")
+                    .mt_2()
+                    .px_2()
+                    .py_1()
+                    .gap_2()
+                    .rounded_md()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(t.warning)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.sidebar_accent))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.inbox_collapsed = !this.inbox_collapsed;
+                        cx.notify();
+                    }))
+                    .child(Icon::new(LIcon::BellRing).xsmall())
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(format!("Attention ({})", attention.len())),
+                    )
+                    .child(
+                        Icon::new(if collapsed {
+                            LIcon::ChevronRight
+                        } else {
+                            LIcon::ChevronDown
+                        })
+                        .xsmall(),
+                    ),
+            );
+            if !collapsed {
+                for item in attention.iter().take(8) {
+                    let tid = item.thread_id.clone();
+                    let (icon, color) = match item.phase {
+                        inbox::Phase::Blocked => (LIcon::OctagonAlert, t.warning),
+                        inbox::Phase::Errored => (LIcon::CircleAlert, t.danger),
+                        inbox::Phase::ReadyUnread => (LIcon::CircleCheck, t.success),
+                        inbox::Phase::Working => (LIcon::LoaderCircle, t.info),
+                        inbox::Phase::Snoozed => (LIcon::Clock, t.muted_foreground),
+                        inbox::Phase::Idle => (LIcon::CircleDot, t.muted_foreground),
+                    };
+                    let project_id = item.project_id.clone();
+                    list = list.child(
+                        v_flex()
+                            .id(SharedString::from(format!("attention-{tid}")))
+                            .pl_5()
+                            .pr_2()
+                            .py_1()
+                            .gap_0p5()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.sidebar_accent))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if this.dirty_tabs(cx) > 0 {
+                                    this.toast(
+                                        "Unsaved files — save (Ctrl+S) or /discard first",
+                                        true,
+                                    );
+                                    cx.notify();
+                                    return;
+                                }
+                                this.active_project = Some(project_id.clone());
+                                this.run(Cmd::Thread(tid.clone()), window, cx)
+                            }))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .text_sm()
+                                    .child(Icon::new(icon).xsmall().text_color(color))
+                                    .child(div().flex_1().truncate().child(item.title.clone())),
+                            )
+                            .child(
+                                div()
+                                    .pl_5()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .truncate()
+                                    .child(item.detail.clone()),
+                            ),
+                    );
+                }
+            }
+        }
         for p in &self.store.state.projects {
             let pid = p.id.clone();
             let active_project = Some(&p.id) == self.active_project.as_ref();
@@ -2685,6 +3192,16 @@ impl GrayApp {
                             .child(format!("Approve? {label}")),
                     )
                     .child(
+                        Button::new("approve-always")
+                            .ghost()
+                            .small()
+                            .label("Always")
+                            .tooltip("Approve and auto-accept future permissions")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run(Cmd::ApproveAlways, window, cx)
+                            })),
+                    )
+                    .child(
                         Button::new("approve")
                             .primary()
                             .small()
@@ -3037,15 +3554,55 @@ impl GrayApp {
 
     fn render_terminal(&self, side: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
-        let mut lines = v_flex().font_family(t.mono_font_family.clone()).text_xs();
-        for l in self.terminal_lines.iter().rev().take(300).rev() {
-            lines = lines.child(div().child(l.clone()));
+        let me = cx.entity();
+        let mut lines = v_flex()
+            .font_family(t.mono_font_family.clone())
+            .text_xs()
+            .gap_0();
+        let rows = self.pty.as_ref().map(|p| p.styled()).unwrap_or_default();
+        for (r, spans) in rows.iter().enumerate() {
+            let mut row = h_flex().gap_0();
+            for sp in spans {
+                let mut d = div().child(sp.text.clone());
+                if let Some(fg) = sp.fg {
+                    d = d.text_color(rgb(fg));
+                }
+                if let Some(bg) = sp.bg {
+                    d = d.bg(rgb(bg));
+                }
+                if sp.bold {
+                    d = d.font_semibold();
+                }
+                if sp.italic {
+                    d = d.italic();
+                }
+                if sp.underline {
+                    d = d.underline();
+                }
+                row = row.child(d);
+            }
+            if spans.is_empty() {
+                row = row.child(div().child(" "));
+            }
+            lines = lines.child(div().id(("term-row", r)).child(row));
         }
+        if self.pty.is_none() {
+            lines = lines.child(
+                div()
+                    .text_color(t.muted_foreground)
+                    .child("No terminal — open a project or press Ctrl+J"),
+            );
+        }
+        let title = self
+            .pty
+            .as_ref()
+            .and_then(|p| p.title())
+            .unwrap_or_else(|| "Terminal".into());
         let mut outer = v_flex().flex_none().border_color(t.border).bg(t.background);
         outer = if side {
             outer.w(px(300.)).h_full().border_l_1()
         } else {
-            outer.h(px(240.)).border_t_1()
+            outer.h(px(280.)).border_t_1()
         };
         outer
             .child(
@@ -3057,8 +3614,21 @@ impl GrayApp {
                     .border_b_1()
                     .border_color(t.border)
                     .child(Icon::new(IconName::SquareTerminal).xsmall())
-                    .child("Terminal")
-                    .child(div().flex_1())
+                    .child(div().flex_1().truncate().child(title))
+                    .child(
+                        Button::new("restart-terminal")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::RefreshCw)
+                            .tooltip("Restart shell")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.pty = None;
+                                this.pty_cwd = None;
+                                this.ensure_pty();
+                                cx.notify();
+                                let _ = window;
+                            })),
+                    )
                     .child(
                         Button::new("close-terminal")
                             .ghost()
@@ -3071,12 +3641,36 @@ impl GrayApp {
             )
             .child(
                 div()
-                    .id("terminal-output")
+                    .id("terminal-screen")
+                    .track_focus(&self.pty_focus)
+                    .key_context("Terminal")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
                     .px_3()
                     .py_2()
+                    .cursor_text()
+                    .on_click({
+                        let focus = self.pty_focus.clone();
+                        move |_, window, cx| {
+                            window.focus(&focus, cx);
+                        }
+                    })
+                    .on_key_down(move |ev, _window, app| {
+                        let ks = &ev.keystroke;
+                        let key = ks.key_char.as_deref().unwrap_or(&ks.key);
+                        if let Some(bytes) = pty::key_to_bytes(
+                            key,
+                            ks.modifiers.control,
+                            ks.modifiers.alt,
+                            ks.modifiers.shift,
+                        ) {
+                            me.update(app, |this, cx| {
+                                this.pty_write(&bytes, cx);
+                            });
+                            app.stop_propagation();
+                        }
+                    })
                     .child(lines),
             )
             .child(
@@ -3084,6 +3678,506 @@ impl GrayApp {
                     .px_2()
                     .pb_2()
                     .child(Input::new(&self.terminal_input).prefix(div().text_xs().child("$"))),
+            )
+    }
+
+    fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let thread = self
+            .active_thread
+            .as_ref()
+            .and_then(|id| self.store.state.thread(id));
+        let running = self.turns.len();
+        let total = usage::grand_total(&self.store.state);
+        let tokens = usage::fmt_tokens(total.total);
+        let cost = if total.cost_micros > 0 {
+            format!(" · {}", usage::fmt_cost(total.cost_micros))
+        } else {
+            String::new()
+        };
+        let (provider, model) = thread
+            .map(|t| {
+                (
+                    provider::provider_label(&t.provider).to_string(),
+                    t.model.clone(),
+                )
+            })
+            .unwrap_or_else(|| ("Gray".into(), "default".into()));
+        h_flex()
+            .h(px(26.))
+            .px_3()
+            .gap_3()
+            .items_center()
+            .flex_none()
+            .border_t_1()
+            .border_color(t.border)
+            .bg(t.sidebar)
+            .text_xs()
+            .text_color(t.muted_foreground)
+            .when_some(self.branch.clone(), |s, b| {
+                s.child(
+                    h_flex()
+                        .gap_1()
+                        .child(Icon::new(LIcon::GitBranch).xsmall())
+                        .child(b),
+                )
+            })
+            .when_some(thread.and_then(|t| t.worktree.clone()), |s, w| {
+                s.child(
+                    h_flex()
+                        .gap_1()
+                        .child(Icon::new(LIcon::ListTree).xsmall())
+                        .child(
+                            Path::new(&w)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                        ),
+                )
+            })
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Icon::new(IconName::Bot).xsmall())
+                    .child(format!("{provider} · {model}")),
+            )
+            .child(div().flex_1())
+            .when(running > 0, |s| {
+                s.child(
+                    h_flex()
+                        .gap_1()
+                        .text_color(t.info)
+                        .child(Icon::new(LIcon::LoaderCircle).xsmall())
+                        .child(format!("{running} running")),
+                )
+            })
+            .when(!self.unread.is_empty(), |s| {
+                let n = self.unread.len();
+                s.child(
+                    h_flex()
+                        .id("statusbar-unread")
+                        .gap_1()
+                        .text_color(t.warning)
+                        .cursor_pointer()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.run(Cmd::ToggleInbox, window, cx)
+                            }),
+                        )
+                        .child(Icon::new(LIcon::BellRing).xsmall())
+                        .child(format!("{n} unread")),
+                )
+            })
+            .child(
+                h_flex()
+                    .id("statusbar-usage")
+                    .gap_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.run(Cmd::SettingsSection("usage".into()), window, cx)
+                    }))
+                    .child(Icon::new(LIcon::Gauge).xsmall())
+                    .child(format!("{tokens} tok{cost}")),
+            )
+    }
+
+    fn render_review(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let thread = self
+            .active_thread
+            .as_ref()
+            .and_then(|id| self.store.state.thread(id));
+        let mut body = v_flex()
+            .id("review-scroll")
+            .flex_1()
+            .overflow_y_scroll()
+            .p_3()
+            .gap_2();
+        match thread {
+            None => {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(t.muted_foreground)
+                        .child("Select a thread to review its turn history"),
+                );
+            }
+            Some(th) => {
+                let spans = ledger::turn_spans(th);
+                if self.restore_undo.is_some() {
+                    body = body.child(
+                        h_flex()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(t.warning)
+                            .px_3()
+                            .py_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(t.warning)
+                                    .child("Last restore can be undone"),
+                            )
+                            .child(
+                                Button::new("undo-restore")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(LIcon::Undo2)
+                                    .label("Undo restore")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.run(Cmd::UndoRestore, window, cx)
+                                    })),
+                            ),
+                    );
+                }
+                body = body.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("review-diff-all")
+                                .ghost()
+                                .small()
+                                .icon(LIcon::FileDiff)
+                                .label("Diff vs HEAD")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.run(Cmd::HeadDiff, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("review-commit")
+                                .ghost()
+                                .small()
+                                .icon(LIcon::GitPullRequest)
+                                .label("Commit all")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.run(Cmd::CommitAll, window, cx)
+                                })),
+                        ),
+                );
+                if spans.is_empty() {
+                    body = body.child(
+                        div()
+                            .text_sm()
+                            .text_color(t.muted_foreground)
+                            .child("No turns yet — checkpoints appear after each prompt"),
+                    );
+                }
+                for span in spans {
+                    let checkpoint = span.checkpoint.clone();
+                    // File counts are computed in refresh_workspace so this
+                    // render doesn't spawn `git diff` per span per frame.
+                    let files = checkpoint
+                        .as_ref()
+                        .and_then(|cp| self.review_files.get(cp))
+                        .copied()
+                        .unwrap_or(0);
+                    let mut card = v_flex()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(t.border)
+                        .px_3()
+                        .py_2()
+                        .gap_1();
+                    card = card.child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Icon::new(if span.status == "latest" {
+                                    LIcon::LoaderCircle
+                                } else {
+                                    LIcon::CircleCheck
+                                })
+                                .xsmall()
+                                .text_color(
+                                    if span.status == "latest" {
+                                        t.info
+                                    } else {
+                                        t.success
+                                    },
+                                ),
+                            )
+                            .child(div().flex_1().truncate().text_sm().child(format!(
+                                "Turn {} — {}",
+                                span.index + 1,
+                                span.first_label
+                            )))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .child(format!("{files} files")),
+                            ),
+                    );
+                    if let Some(cp) = checkpoint {
+                        let cp2 = cp.clone();
+                        card = card.child(
+                            h_flex()
+                                .gap_2()
+                                .pl_5()
+                                .child(
+                                    Button::new(SharedString::from(format!("diff-{cp}")))
+                                        .ghost()
+                                        .xsmall()
+                                        .label("Diff")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.run(Cmd::DiffTree(cp.clone()), window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("restore-{cp2}")))
+                                        .ghost()
+                                        .xsmall()
+                                        .label("Restore")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.run(Cmd::RestoreTree(cp2.clone()), window, cx)
+                                        })),
+                                ),
+                        );
+                    }
+                    body = body.child(card);
+                }
+            }
+        }
+        body
+    }
+
+    fn render_inbox(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let running: HashSet<String> = self.turns.keys().cloned().collect();
+        let blocked: HashSet<String> = self
+            .pending_approval
+            .as_ref()
+            .map(|(tid, _)| tid.clone())
+            .into_iter()
+            .collect();
+        let items = inbox::attention(&self.store.state, &running, &blocked, &self.unread, now());
+        let mut body = v_flex()
+            .id("inbox-scroll")
+            .flex_1()
+            .overflow_y_scroll()
+            .p_3()
+            .gap_2();
+        if items.is_empty() {
+            body = body.child(
+                div()
+                    .text_sm()
+                    .text_color(t.muted_foreground)
+                    .child("Nothing needs attention — all threads are quiet"),
+            );
+        }
+        for item in items {
+            let tid = item.thread_id.clone();
+            let pid = item.project_id.clone();
+            let (icon, color, label) = match item.phase {
+                inbox::Phase::Blocked => (LIcon::OctagonAlert, t.warning, "blocked"),
+                inbox::Phase::Errored => (LIcon::CircleAlert, t.danger, "error"),
+                inbox::Phase::ReadyUnread => (LIcon::CircleCheck, t.success, "ready"),
+                inbox::Phase::Working => (LIcon::LoaderCircle, t.info, "working"),
+                inbox::Phase::Snoozed => (LIcon::Clock, t.muted_foreground, "snoozed"),
+                inbox::Phase::Idle => (LIcon::CircleDot, t.muted_foreground, "idle"),
+            };
+            body = body.child(
+                v_flex()
+                    .id(SharedString::from(format!("inbox-{tid}")))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(t.border)
+                    .px_3()
+                    .py_2()
+                    .gap_1()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.secondary))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.dirty_tabs(cx) > 0 {
+                            this.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                            cx.notify();
+                            return;
+                        }
+                        this.active_project = Some(pid.clone());
+                        this.run(Cmd::Thread(tid.clone()), window, cx)
+                    }))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(Icon::new(icon).xsmall().text_color(color))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_sm()
+                                    .child(item.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .px_1p5()
+                                    .rounded_sm()
+                                    .bg(t.secondary)
+                                    .text_color(color)
+                                    .child(label),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .pl_5()
+                            .text_xs()
+                            .text_color(t.muted_foreground)
+                            .truncate()
+                            .child(item.detail.clone()),
+                    ),
+            );
+        }
+        body
+    }
+
+    fn render_launcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let (provider, model, mode) = self.defaults();
+        let effort = self
+            .active_thread
+            .as_ref()
+            .and_then(|id| self.store.state.thread(id))
+            .map(|t| t.effort.clone())
+            .unwrap_or_else(|| "medium".into());
+        let cycle = |cur: &str, opts: &[&str]| -> String {
+            let i = opts.iter().position(|o| *o == cur).unwrap_or(0);
+            opts[(i + 1) % opts.len()].to_string()
+        };
+        let provs: Vec<&str> = PROVIDERS.iter().map(|p| p.id).collect();
+        let models: &[&str] = PROVIDERS
+            .iter()
+            .find(|p| p.id == provider)
+            .map(|p| p.models)
+            .unwrap_or(&[]);
+        let next_prov = cycle(&provider, &provs);
+        let next_model = if models.is_empty() {
+            model.clone()
+        } else {
+            cycle(&model, models)
+        };
+        let next_effort = cycle(&effort, &["low", "medium", "high"]);
+        let next_mode = cycle(&mode, &["full", "edits", "readonly"]);
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::black().opacity(0.5))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                v_flex()
+                    .w(px(560.))
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(t.border)
+                    .bg(t.popover)
+                    .shadow_lg()
+                    .p_4()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(Icon::new(LIcon::Sparkles).text_color(t.primary))
+                            .child(div().flex_1().text_lg().font_semibold().child("New task"))
+                            .child(
+                                Button::new("launcher-close")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Close)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.launcher_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(Input::new(&self.launcher_input))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Button::new("launcher-wt-toggle")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(if self.launcher_wt {
+                                        LIcon::SquareCheck
+                                    } else {
+                                        LIcon::Square
+                                    })
+                                    .label("worktree")
+                                    .selected(self.launcher_wt)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.launcher_wt = !this.launcher_wt;
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(self.launcher_wt, |s| {
+                                s.child(div().flex_1().child(Input::new(&self.launcher_worktree)))
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                chip(
+                                    "launch-provider",
+                                    IconName::Bot,
+                                    provider::provider_label(&provider),
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, _cx| {
+                                        this.configure(Some(next_prov.clone()), None, None);
+                                        let _ = window;
+                                    },
+                                )),
+                            )
+                            .child(
+                                chip("launch-model", IconName::Cpu, model.clone(), cx).on_click(
+                                    cx.listener(move |this, _, window, _cx| {
+                                        this.configure(None, Some(next_model.clone()), None);
+                                        let _ = window;
+                                    }),
+                                ),
+                            )
+                            .child(
+                                chip("launch-effort", LIcon::Gauge, effort.clone(), cx).on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.run(Cmd::Effort(next_effort.clone()), window, cx);
+                                    }),
+                                ),
+                            )
+                            .child(
+                                chip(
+                                    "launch-mode",
+                                    LIcon::Shield,
+                                    provider::mode_label(&mode),
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, _cx| {
+                                        this.configure(None, None, Some(next_mode.clone()));
+                                        let _ = window;
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        h_flex().gap_2().child(div().flex_1()).child(
+                            Button::new("launcher-start")
+                                .primary()
+                                .label("Start task")
+                                .icon(LIcon::Play)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.run(Cmd::LauncherGo, window, cx)
+                                })),
+                        ),
+                    ),
             )
     }
 
@@ -3154,6 +4248,29 @@ impl GrayApp {
                         cx.notify();
                     })),
             )
+            .child(
+                Button::new("panel-review")
+                    .ghost()
+                    .small()
+                    .label("Review")
+                    .selected(panel == Panel::Review)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.panel = Some(Panel::Review);
+                        this.refresh_workspace(cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("panel-inbox")
+                    .ghost()
+                    .small()
+                    .label("Inbox")
+                    .selected(panel == Panel::Inbox)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.panel = Some(Panel::Inbox);
+                        cx.notify();
+                    })),
+            )
             .child(div().flex_1())
             .child(
                 Button::new("panel-refresh")
@@ -3176,6 +4293,8 @@ impl GrayApp {
                     })),
             );
         let body: AnyElement = match panel {
+            Panel::Review => self.render_review(cx).into_any_element(),
+            Panel::Inbox => self.render_inbox(cx).into_any_element(),
             Panel::Sessions => self.render_sessions(cx).into_any_element(),
             Panel::Skills => self.render_skills(cx).into_any_element(),
             Panel::Viewer => self.render_viewer(cx).into_any_element(),
@@ -3488,7 +4607,8 @@ impl GrayApp {
                 "Shortcuts",
                 "shortcuts",
                 cx,
-            ));
+            ))
+            .child(nav("nav-usage", IconName::Cpu, "Usage", "usage", cx));
         nav_col = nav_col.child(
             div()
                 .px_3()
@@ -3607,6 +4727,7 @@ impl GrayApp {
         let (title, subtitle) = match self.settings_section.as_str() {
             "appearance" => ("Appearance", "Theme and background"),
             "shortcuts" => ("Shortcuts", "Keyboard shortcuts"),
+            "usage" => ("Usage", "Tokens and cost across threads"),
             "about" => ("About", "Version and data"),
             _ => ("Preferences", "Customize layout and default behavior"),
         };
@@ -3700,6 +4821,46 @@ impl GrayApp {
                             .child(keys)
                             .into_any_element(),
                     ));
+                }
+            }
+            "usage" => {
+                let gt = usage::grand_total(&self.store.state);
+                let line = |label: String, u: &store::UsageTotals| {
+                    let cost = if u.cost_micros > 0 {
+                        format!(" · {}", usage::fmt_cost(u.cost_micros))
+                    } else {
+                        String::new()
+                    };
+                    let reqs = if u.requests > 0 {
+                        format!(" · {} req", u.requests)
+                    } else {
+                        String::new()
+                    };
+                    row(
+                        &label,
+                        &format!(
+                            "in {} · out {}{}{}",
+                            usage::fmt_tokens(u.input),
+                            usage::fmt_tokens(u.output),
+                            cost,
+                            reqs
+                        ),
+                        div()
+                            .text_sm()
+                            .text_color(t.muted_foreground)
+                            .child(usage::fmt_tokens(u.total))
+                            .into_any_element(),
+                    )
+                };
+                page = page.child(line("All threads".into(), &gt));
+                for th in self
+                    .store
+                    .state
+                    .threads
+                    .iter()
+                    .filter(|th| th.usage.total > 0)
+                {
+                    page = page.child(line(th.title.clone(), &th.usage));
                 }
             }
             "about" => {
@@ -4319,6 +5480,12 @@ fn relative(ms: i64) -> String {
 
 impl Render for GrayApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.pending_sends.is_empty() {
+            let sends = std::mem::take(&mut self.pending_sends);
+            for (tid, text) in sends {
+                self.send_to_thread(&tid, text, cx);
+            }
+        }
         if !self.pending_cmds.is_empty() {
             let lines = std::mem::take(&mut self.pending_cmds);
             for line in lines {
@@ -4391,7 +5558,12 @@ impl Render for GrayApp {
                     .child(self.render_panel(p, cx)),
             );
         }
-        let main = div().size_full().min_w_0().min_h_0().child(main);
+        let main = v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(div().flex_1().min_h_0().child(main))
+            .child(self.render_statusbar(cx));
         let bg = self.store.state.setting("background", "none");
         div()
             .id("gray-root")
@@ -4452,10 +5624,18 @@ impl Render for GrayApp {
             .on_action(cx.listener(|this, _: &BranchPicker, w, cx| {
                 this.open_palette(PaletteMode::Commands, "Branch:", w, cx)
             }))
+            .on_action(cx.listener(|this, _: &NewTask, w, cx| this.run(Cmd::NewTask, w, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleReview, w, cx| this.run(Cmd::ToggleReview, w, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleInbox, w, cx| this.run(Cmd::ToggleInbox, w, cx)),
+            )
             .child(main)
             .when(bg != "none", |s| s.child(background_layer(&bg)))
             .when(self.palette_open, |s| s.child(self.render_palette(cx)))
             .when(self.settings_open, |s| s.child(self.render_settings(cx)))
+            .when(self.launcher_open, |s| s.child(self.render_launcher(cx)))
             .when_some(self.toast.clone(), |s, (msg, err)| {
                 s.child(
                     div()

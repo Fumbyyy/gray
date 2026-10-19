@@ -82,37 +82,47 @@ pub fn status(dir: &Path) -> Vec<(String, String)> {
     res
 }
 
-pub fn diff(dir: &Path) -> String {
-    let mut text = git(dir, &["diff", "HEAD", "--no-color"])
-        .or_else(|| git(dir, &["diff", "--no-color"]))
-        .unwrap_or_default();
+/// Untracked files get a `--no-index` diff against /dev/null. Prefix a
+/// leading `-` so a file like `-rf` isn't parsed as a diff flag.
+fn no_index_arg(path: String) -> String {
+    if path.starts_with('-') {
+        format!("./{path}")
+    } else {
+        path
+    }
+}
+
+fn diff_untracked(dir: &Path, text: &mut String) {
     for (code, path) in status(dir) {
         if code == "??"
             && let Ok(d) = Command::new("git")
                 .arg("-C")
                 .arg(dir)
-                .args(["diff", "--no-color", "--no-index", "/dev/null", &path])
+                .args([
+                    "diff",
+                    "--no-color",
+                    "--no-index",
+                    "/dev/null",
+                    &no_index_arg(path),
+                ])
                 .output()
         {
             text.push_str(&String::from_utf8_lossy(&d.stdout));
         }
     }
+}
+
+pub fn diff(dir: &Path) -> String {
+    let mut text = git(dir, &["diff", "HEAD", "--no-color"])
+        .or_else(|| git(dir, &["diff", "--no-color"]))
+        .unwrap_or_default();
+    diff_untracked(dir, &mut text);
     text
 }
 
 pub fn diff_since(dir: &Path, base: &str) -> String {
     let mut text = git(dir, &["diff", base, "--no-color"]).unwrap_or_default();
-    for (code, path) in status(dir) {
-        if code == "??"
-            && let Ok(d) = Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(["diff", "--no-color", "--no-index", "/dev/null", &path])
-                .output()
-        {
-            text.push_str(&String::from_utf8_lossy(&d.stdout));
-        }
-    }
+    diff_untracked(dir, &mut text);
     text
 }
 
@@ -185,5 +195,8 @@ pub fn restore(dir: &Path, tree: &str) -> Result<(), String> {
     };
     run(&["add", "-A"])?;
     run(&["read-tree", "-u", "--reset", tree])?;
-    run(&["reset", "-q"])
+    // `git reset` unstages; on an unborn-HEAD repo it fails, but the index
+    // already matches `tree` then — a fine resting state either way.
+    let _ = run(&["reset", "-q"]);
+    Ok(())
 }

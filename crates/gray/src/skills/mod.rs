@@ -336,6 +336,31 @@ pub fn validate_skill_args(skill: &Skill, args: Option<&str>) -> Result<(), Stri
     }
 }
 
+/// Home-relative skill dirs shared with other agent CLIs. Mirrors the `skills`
+/// entries in the detected tool table at `quality_of_life::detect::TOOLS`;
+/// opencode is handled separately so its per-subdirectory skills are included.
+const USER_AGENT_SKILL_DIRS: &[&str] = &[
+    ".claude/skills",
+    ".codex/skills",
+    ".cursor/skills",
+    ".openclaw/skills",
+    ".hermes/skills",
+];
+
+/// Project-relative config dirs scanned for `skills/` at each ancestor up to
+/// the git root.
+const PROJECT_SKILL_DIRS: &[&str] = &[
+    ".gray",
+    ".claude",
+    ".codex",
+    ".cursor",
+    ".devin",
+    ".opencode",
+    ".agents",
+    ".openclaw",
+    ".hermes",
+];
+
 fn push_root(
     roots: &mut Vec<(PathBuf, &'static str)>,
     dir: PathBuf,
@@ -365,6 +390,15 @@ fn skill_search_roots(cwd: &Path, agent_dir: &Path) -> Vec<(PathBuf, &'static st
         return roots;
     }
     if let Some(home) = resolve_home() {
+        // The tool-neutral shared dir outranks vendor-specific dirs (and
+        // matches the order gray-ide scans in `crate::skills::discover`).
+        push_root(
+            &mut roots,
+            home.join(".agents").join("skills"),
+            "user",
+            &global_skills,
+        );
+
         let config_base = std::env::var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join(".config"));
@@ -385,10 +419,14 @@ fn skill_search_roots(cwd: &Path, agent_dir: &Path) -> Vec<(PathBuf, &'static st
 
         push_root(
             &mut roots,
-            home.join(".agents").join("skills"),
+            config_base.join("devin").join("skills"),
             "user",
             &global_skills,
         );
+
+        for rel in USER_AGENT_SKILL_DIRS {
+            push_root(&mut roots, home.join(rel), "user", &global_skills);
+        }
     }
 
     if !crate::project_trust::is_trusted(&resolved_agent_dir, &resolved_cwd) {
@@ -417,7 +455,7 @@ fn skill_search_roots(cwd: &Path, agent_dir: &Path) -> Vec<(PathBuf, &'static st
         }
     }
     for ancestor in project_roots.iter().rev() {
-        for cfg in [".gray", ".opencode", ".agents"] {
+        for cfg in PROJECT_SKILL_DIRS {
             let d = ancestor.join(cfg).join("skills");
             if d.is_dir() {
                 roots.push((d, "project"));

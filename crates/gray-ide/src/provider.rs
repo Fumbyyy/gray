@@ -1,6 +1,6 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{
     Arc, Mutex,
@@ -21,6 +21,13 @@ pub enum ProviderEvent {
     Session(String),
     Approval {
         label: String,
+    },
+    Usage {
+        input: u64,
+        output: u64,
+        total: u64,
+        cost_micros: Option<u64>,
+        requests: Option<u64>,
     },
     Done,
     Error(String),
@@ -88,11 +95,25 @@ pub fn default_model(provider: &str) -> &'static str {
 pub struct Turn {
     pub rx: Receiver<ProviderEvent>,
     pub pending: Arc<Mutex<Option<Sender<bool>>>>,
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
 }
 
 impl Turn {
+    /// Steer a mid-turn message into the running child, when the provider
+    /// was spawned with a steerable stdin (gray's print-mode
+    /// `{"type":"steer"}` line protocol; see `GRAY_STDIN_STEER`).
+    /// Err when the child has no writable stdin or the write fails.
+    pub fn steer(&self, text: &str) -> Result<(), String> {
+        let line = serde_json::json!({ "type": "steer", "text": text });
+        let mut guard = self.stdin.lock().map_err(|e| e.to_string())?;
+        let stdin = guard
+            .as_mut()
+            .ok_or_else(|| "provider stdin is not steerable".to_string())?;
+        writeln!(stdin, "{line}").map_err(|e| e.to_string())
+    }
+
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         if let Ok(mut guard) = self.child.lock()
@@ -117,6 +138,8 @@ pub fn start(req: TurnRequest) -> Turn {
     let (tx, rx) = channel();
     let child = Arc::new(Mutex::new(None));
     let slot = child.clone();
+    let stdin = Arc::new(Mutex::new(None));
+    let stdin_slot = stdin.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = cancelled.clone();
     let pending = Arc::new(Mutex::new(None::<Sender<bool>>));
@@ -127,9 +150,18 @@ pub fn start(req: TurnRequest) -> Turn {
         } else {
             match req.provider.as_str() {
                 "fake" => run_fake(&req, &tx, &flag, &pend),
-                "claude" => run_process(claude_command(&req), &tx, &slot, &flag, parse_claude),
-                "codex" => run_process(codex_command(&req), &tx, &slot, &flag, parse_codex),
-                _ => run_process(gray_command(&req), &tx, &slot, &flag, parse_gray),
+                "claude" => {
+                    run_process(claude_command(&req), &tx, &slot, &flag, parse_claude, None)
+                }
+                "codex" => run_process(codex_command(&req), &tx, &slot, &flag, parse_codex, None),
+                _ => run_process(
+                    gray_command(&req),
+                    &tx,
+                    &slot,
+                    &flag,
+                    parse_gray,
+                    Some(stdin_slot),
+                ),
             }
         };
         if let Ok(mut p) = pend.lock() {
@@ -147,6 +179,7 @@ pub fn start(req: TurnRequest) -> Turn {
     Turn {
         rx,
         pending,
+        stdin,
         child,
         cancelled,
     }
@@ -159,6 +192,9 @@ fn bin(env: &str, default: &str) -> String {
 fn gray_command(req: &TurnRequest) -> Command {
     let mut cmd = Command::new(bin("GRAY_IDE_GRAY_BIN", "gray"));
     cmd.arg("-p").arg(&req.prompt).arg("--json");
+    // Enable the `{"type":"steer"}` stdin protocol so `Turn::steer` can
+    // deliver mid-turn input; the child is spawned with a piped stdin.
+    cmd.env("GRAY_STDIN_STEER", "1");
     if !req.model.is_empty() && req.model != "default" {
         cmd.arg("--model").arg(&req.model);
     }
@@ -219,13 +255,23 @@ fn run_process(
     slot: &Arc<Mutex<Option<Child>>>,
     cancelled: &Arc<AtomicBool>,
     parse: fn(&serde_json::Value, &mut ParseState) -> Vec<ProviderEvent>,
+    steer_stdin: Option<Arc<Mutex<Option<ChildStdin>>>>,
 ) -> Result<(), String> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(if steer_stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to start {:?}: {e}", cmd.get_program()))?;
+    if let Some(steer) = &steer_stdin
+        && let Ok(mut g) = steer.lock()
+    {
+        *g = child.stdin.take();
+    }
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take();
     if cancelled.load(Ordering::SeqCst) {
@@ -261,6 +307,34 @@ fn run_process(
         }
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(v) => {
+                // gray's demuxed ask protocol (`GRAY_STDIN_STEER` also
+                // enables it): the child emits a
+                // `{"phase":"ask","ask_id":N}` row and parks the turn until
+                // an `{"ask_id":N,"answers":{...}}` reply arrives on
+                // stdin. The IDE has no ask UI, so dismiss with empty
+                // answers — same result as the pre-demux stdin-EOF path,
+                // instead of stalling for the 300s timeout.
+                if let Some(ask_id) = demux_ask_id(&v) {
+                    let question = v
+                        .pointer("/questions/0/question")
+                        .and_then(|q| q.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Some(steer) = &steer_stdin
+                        && let Ok(mut g) = steer.lock()
+                        && let Some(stdin) = g.as_mut()
+                    {
+                        let reply =
+                            serde_json::json!({"ask_id": ask_id, "answers": {}});
+                        let _ = writeln!(stdin, "{reply}");
+                    }
+                    let _ = tx.send(ProviderEvent::Activity {
+                        kind: "approval".into(),
+                        label: "Plugin question dismissed".into(),
+                        detail: question,
+                    });
+                    continue;
+                }
                 for ev in parse(&v, &mut state) {
                     let _ = tx.send(ev);
                 }
@@ -326,6 +400,23 @@ fn s(v: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
+fn u64_at(v: &serde_json::Value, key: &str) -> Option<u64> {
+    v.get(key).and_then(|x| x.as_u64())
+}
+
+/// If `v` is a gray demuxed ask row
+/// (`{"type":"progress","phase":"ask","ask_id":N}`), return the ask id
+/// that must be answered on the child's stdin.
+fn demux_ask_id(v: &serde_json::Value) -> Option<u64> {
+    if v.get("type").and_then(|t| t.as_str()) == Some("progress")
+        && v.get("phase").and_then(|p| p.as_str()) == Some("ask")
+    {
+        v.get("ask_id").and_then(|a| a.as_u64())
+    } else {
+        None
+    }
+}
+
 pub fn parse_gray(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEvent> {
     let mut out: Vec<ProviderEvent> = st.session(s(v, "session_id")).into_iter().collect();
     out.extend(parse_gray_row(v, st));
@@ -377,11 +468,25 @@ fn parse_gray_row(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEve
             _ => vec![],
         },
         Some("result") => {
-            if st.got_text {
-                vec![]
-            } else {
-                vec![ProviderEvent::Replace(s(v, "text"))]
+            let mut out = Vec::new();
+            if v.get("usage").is_some() || v.get("accounting").is_some() {
+                let usage = v.get("usage").cloned().unwrap_or_default();
+                let accounting = v.get("accounting").cloned().unwrap_or_default();
+                let input = u64_at(&usage, "input_tokens").unwrap_or(0);
+                let output = u64_at(&usage, "output_tokens").unwrap_or(0);
+                let total = u64_at(&usage, "total_tokens").unwrap_or(input + output);
+                out.push(ProviderEvent::Usage {
+                    input,
+                    output,
+                    total,
+                    cost_micros: u64_at(&accounting, "cost_micros"),
+                    requests: u64_at(&accounting, "requests"),
+                });
             }
+            if !st.got_text {
+                out.push(ProviderEvent::Replace(s(v, "text")));
+            }
+            out
         }
         Some("error") => {
             st.error = Some(s(v, "message").to_string())
@@ -423,6 +528,22 @@ pub fn parse_claude(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderE
             }
         }
         Some("result") => {
+            if let Some(usage) = v.get("usage") {
+                let input = u64_at(usage, "input_tokens").unwrap_or(0);
+                let output = u64_at(usage, "output_tokens").unwrap_or(0);
+                let total = u64_at(usage, "total_tokens").unwrap_or(input + output);
+                let cost_micros = v
+                    .get("total_cost_usd")
+                    .and_then(|c| c.as_f64())
+                    .map(|c| (c * 1e6) as u64);
+                out.push(ProviderEvent::Usage {
+                    input,
+                    output,
+                    total,
+                    cost_micros,
+                    requests: None,
+                });
+            }
             if v.get("is_error").and_then(|e| e.as_bool()) == Some(true) {
                 st.error = Some(s(v, "result"));
             } else if !st.got_text {
@@ -464,6 +585,20 @@ pub fn parse_codex(v: &serde_json::Value, st: &mut ParseState) -> Vec<ProviderEv
                         .unwrap_or_default(),
                 }),
                 _ => {}
+            }
+        }
+        Some("turn.completed") => {
+            if let Some(usage) = v.get("usage") {
+                let input = u64_at(usage, "input_tokens").unwrap_or(0);
+                let output = u64_at(usage, "output_tokens").unwrap_or(0);
+                let total = u64_at(usage, "total_tokens").unwrap_or(input + output);
+                out.push(ProviderEvent::Usage {
+                    input,
+                    output,
+                    total,
+                    cost_micros: None,
+                    requests: None,
+                });
             }
         }
         Some("turn.failed") | Some("error") => {
@@ -577,6 +712,15 @@ fn run_fake(
         let _ = tx.send(ProviderEvent::Text(chunk.to_string()));
         thread::sleep(delay);
     }
+    // Small deterministic usage report so token/cost plumbing is
+    // exercised without a real provider.
+    let _ = tx.send(ProviderEvent::Usage {
+        input: 40,
+        output: 12,
+        total: 52,
+        cost_micros: Some(7),
+        requests: Some(1),
+    });
     Ok(())
 }
 

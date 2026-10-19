@@ -99,11 +99,10 @@ pub fn parse_list(text: &str) -> Vec<Installed> {
 }
 
 fn list() -> Vec<Installed> {
-    Command::new(gray_bin())
-        .args(["plugin", "list"])
-        .output()
-        .map(|o| parse_list(&String::from_utf8_lossy(&o.stdout)))
-        .unwrap_or_default()
+    match Command::new(gray_bin()).args(["plugin", "list"]).output() {
+        Ok(o) => parse_list(&String::from_utf8_lossy(&o.stdout)),
+        Err(_) => Vec::new(),
+    }
 }
 
 pub fn refresh(tx: Sender<PluginMsg>) {

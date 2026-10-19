@@ -5,12 +5,27 @@ fn isolated_home(test: &str) -> bool {
         return false;
     }
     // Ancestor walks (skills dirs, AGENTS.md) must never reach the real
-    // $HOME: put the fake home under /tmp and force the child's tempdirs
-    // there too — a session TMPDIR can point back inside $HOME.
-    let home = tempfile::Builder::new()
-        .prefix("gray-test-home-")
-        .tempdir_in("/tmp")
-        .unwrap_or_else(|_| tempfile::tempdir().unwrap());
+    // $HOME: put the fake home outside the user profile. On Windows %TEMP%
+    // lives inside the profile, so fall back to machine-wide temp roots
+    // before tempfile::tempdir(). The .git marker additionally bounds any
+    // git-root walk at the fake home itself as a last resort.
+    let mut roots = vec![std::path::PathBuf::from("/tmp")];
+    if let Some(windir) = std::env::var_os("WINDIR") {
+        roots.push(std::path::PathBuf::from(windir).join("Temp"));
+    }
+    if let Some(pd) = std::env::var_os("ProgramData") {
+        roots.push(std::path::PathBuf::from(pd));
+    }
+    let home = roots
+        .iter()
+        .find_map(|root| {
+            tempfile::Builder::new()
+                .prefix("gray-test-home-")
+                .tempdir_in(root)
+                .ok()
+        })
+        .unwrap_or_else(|| tempfile::tempdir().unwrap());
+    std::fs::create_dir_all(home.path().join(".git")).unwrap();
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -23,6 +38,8 @@ fn isolated_home(test: &str) -> bool {
         .env("GRAY_HOME", home.path().join(".gray"))
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("TMPDIR", "/tmp")
+        .env("TMP", home.path())
+        .env("TEMP", home.path())
         .status()
         .unwrap();
     assert!(status.success(), "isolated {test} failed");
@@ -53,14 +70,16 @@ fn substitutions_expand_arguments_and_skill_dir() {
 fn resolve_skill_name_finds_project_skill() {
     crate::project_trust::assume_trusted_for_test();
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join(".gray/skills/commit");
+    // Unique fixture name: a real user skill of the same name discovered via
+    // ancestor dirs (e.g. under %USERPROFILE% on Windows) must not shadow it.
+    let dir = tmp.path().join(".gray/skills/zz-graytest-commit-probe");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("SKILL.md"),
-        "---\nname: commit\ndescription: commit changes\n---\nBody",
+        "---\nname: zz-graytest-commit-probe\ndescription: commit changes\n---\nBody",
     )
     .unwrap();
-    let resolved = resolve_skill_name(tmp.path(), "commit").unwrap();
+    let resolved = resolve_skill_name(tmp.path(), "zz-graytest-commit-probe").unwrap();
     assert_eq!(resolved, dir.join("SKILL.md"));
     assert!(resolve_skill_name(tmp.path(), "missing").is_none());
 }

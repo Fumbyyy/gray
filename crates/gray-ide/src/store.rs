@@ -12,6 +12,25 @@ pub enum Role {
     System,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct UsageTotals {
+    pub input: u64,
+    pub output: u64,
+    pub total: u64,
+    pub cost_micros: u64,
+    pub requests: u64,
+}
+
+impl UsageTotals {
+    pub fn add(&mut self, other: &UsageTotals) {
+        self.input += other.input;
+        self.output += other.output;
+        self.total += other.total;
+        self.cost_micros += other.cost_micros;
+        self.requests += other.requests;
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -95,6 +114,15 @@ pub enum Event {
         status: String,
         at: i64,
     },
+    UsageAdded {
+        thread_id: String,
+        input: u64,
+        output: u64,
+        total: u64,
+        cost_micros: u64,
+        requests: u64,
+        at: i64,
+    },
     SettingChanged {
         key: String,
         value: String,
@@ -140,6 +168,7 @@ pub struct Thread {
     pub effort: String,
     pub updated_at: i64,
     pub last_status: String,
+    pub usage: UsageTotals,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -190,6 +219,7 @@ impl State {
                 effort: "medium".into(),
                 updated_at: *at,
                 last_status: String::new(),
+                usage: UsageTotals::default(),
             }),
             Event::ThreadRenamed { id, title } => {
                 if let Some(t) = self.thread_mut(id) {
@@ -292,6 +322,25 @@ impl State {
                 if let Some(t) = self.thread_mut(thread_id) {
                     t.last_status = status.clone();
                     t.updated_at = *at;
+                }
+            }
+            Event::UsageAdded {
+                thread_id,
+                input,
+                output,
+                total,
+                cost_micros,
+                requests,
+                ..
+            } => {
+                if let Some(t) = self.thread_mut(thread_id) {
+                    t.usage.add(&UsageTotals {
+                        input: *input,
+                        output: *output,
+                        total: *total,
+                        cost_micros: *cost_micros,
+                        requests: *requests,
+                    });
                 }
             }
             Event::SettingChanged { key, value } => {

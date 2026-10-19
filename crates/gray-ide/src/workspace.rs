@@ -1,9 +1,5 @@
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::mpsc::{Receiver, channel};
-use std::thread;
 
 #[derive(Clone, Debug)]
 pub struct FileEntry {
@@ -106,34 +102,4 @@ pub fn language_for(path: &str) -> &'static str {
         "cpp" | "hpp" | "cc" => "cpp",
         _ => "text",
     }
-}
-
-pub fn run_shell(cwd: &Path, command: &str) -> Receiver<String> {
-    let (tx, rx) = channel();
-    let cwd = cwd.to_path_buf();
-    let command = command.to_string();
-    thread::spawn(move || {
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(format!("{command} 2>&1"))
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn();
-        match child {
-            Ok(mut child) => {
-                if let Some(out) = child.stdout.take() {
-                    for line in BufReader::new(out).lines().map_while(Result::ok) {
-                        let _ = tx.send(line);
-                    }
-                }
-                let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
-                let _ = tx.send(format!("[exit {code}]"));
-            }
-            Err(e) => {
-                let _ = tx.send(format!("error: {e}"));
-            }
-        }
-    });
-    rx
 }

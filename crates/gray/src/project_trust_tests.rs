@@ -61,11 +61,13 @@ fn project_skills_load_only_once_the_project_is_trusted() {
     let home = tempfile::tempdir().unwrap();
     let proj = tempfile::tempdir().unwrap();
     repo(proj.path());
-    let skill = proj.path().join(".gray/skills/commit");
+    // Unique fixture name: a real user skill of the same name discovered via
+    // the machine's own skills dirs must not satisfy the absence assertion.
+    let skill = proj.path().join(".gray/skills/zz-graytest-trust-probe");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(
         skill.join("SKILL.md"),
-        "---\nname: commit\ndescription: commit changes\n---\nBody",
+        "---\nname: zz-graytest-trust-probe\ndescription: commit changes\n---\nBody",
     )
     .unwrap();
     let names = |home: &Path| {
@@ -75,7 +77,7 @@ fn project_skills_load_only_once_the_project_is_trusted() {
             .map(|s| s.name)
             .collect::<Vec<_>>()
     };
-    assert!(!names(home.path()).contains(&"commit".to_string()));
+    assert!(!names(home.path()).contains(&"zz-graytest-trust-probe".to_string()));
     trust(home.path(), proj.path()).unwrap();
-    assert!(names(home.path()).contains(&"commit".to_string()));
+    assert!(names(home.path()).contains(&"zz-graytest-trust-probe".to_string()));
 }

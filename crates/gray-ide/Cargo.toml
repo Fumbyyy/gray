@@ -18,5 +18,7 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 env_logger = "0.11"
+portable-pty = "0.9"
+vt100 = "0.16"
 
 [workspace]

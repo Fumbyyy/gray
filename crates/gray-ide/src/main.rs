@@ -3,22 +3,41 @@ mod app;
 mod assets;
 mod git;
 mod graycmds;
+mod inbox;
+mod ledger;
 mod plugins;
 mod provider;
+mod pty;
 mod sessions;
 mod skills;
 mod store;
+mod usage;
 mod workspace;
 
 use gpui_kit::*;
 use std::path::PathBuf;
 
+/// Same precedence as `gray_core::paths::user_home` and
+/// `crate::skills::dirs_home` so the IDE resolves the same home as the
+/// CLI on Windows (USERPROFILE) and unix (HOME).
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
 pub fn data_dir() -> PathBuf {
     std::env::var_os("GRAY_IDE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
+            home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".gray")
                 .join("ide")
@@ -54,6 +73,21 @@ fn main() {
                     std::borrow::Cow::Borrowed(
                         include_bytes!("../fonts/Brygada1918-Italic.ttf") as &[u8]
                     ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/IBMPlexSans-Regular.ttf") as &[u8]
+                    ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/IBMPlexSans-Italic.ttf") as &[u8]
+                    ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/IBMPlexSans-SemiBold.ttf") as &[u8]
+                    ),
+                    std::borrow::Cow::Borrowed(
+                        include_bytes!("../fonts/IBMPlexSans-SemiBoldItalic.ttf") as &[u8]
+                    ),
+                    std::borrow::Cow::Borrowed(include_bytes!("../fonts/Lilex-Regular.ttf") as &[u8]),
+                    std::borrow::Cow::Borrowed(include_bytes!("../fonts/Lilex-Bold.ttf") as &[u8]),
+                    std::borrow::Cow::Borrowed(include_bytes!("../fonts/Lilex-Italic.ttf") as &[u8]),
                 ])
                 .expect("load gray fonts");
             app::apply_brand(cx);

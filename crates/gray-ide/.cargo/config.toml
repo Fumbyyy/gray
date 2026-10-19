@@ -1,0 +1,7 @@
+# GPUI's deeply-nested element trees produce very large debug-build stack
+# frames; the 1MB default Windows main-thread reserve overflows when
+# rendering the heavier panels (review/plugins). Reserve 16MB.
+# Scoped to MSVC: /STACK is a PE link.exe flag — applying it on unix or the
+# GNU windows toolchain fails the link.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "link-args=/STACK:16777216"]

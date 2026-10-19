@@ -45,7 +45,16 @@ fn parse_skill(file: &Path, source: &str) -> Option<Skill> {
     })
 }
 
-fn scan_dir(dir: &Path, source: &str, out: &mut Vec<Skill>) {
+fn scan_dir(
+    dir: &Path,
+    source: &str,
+    out: &mut Vec<Skill>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) {
+    let canon = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !visited.insert(canon) {
+        return;
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -58,35 +67,64 @@ fn scan_dir(dir: &Path, source: &str, out: &mut Vec<Skill>) {
             out.push(s);
         }
         if path.is_dir() {
-            scan_dir(&path, source, out);
+            scan_dir(&path, source, out, visited);
         }
     }
 }
 
+/// Home-relative skill dirs shared with other agent CLIs (same set the CLI
+/// scans in `crates/gray/src/skills/mod.rs`).
+const USER_AGENT_SKILL_DIRS: &[&str] = &[
+    ".claude/skills",
+    ".codex/skills",
+    ".cursor/skills",
+    ".openclaw/skills",
+    ".hermes/skills",
+];
+
+/// Project-relative config dirs scanned for `skills/` at each ancestor.
+const PROJECT_SKILL_DIRS: &[&str] = &[
+    ".gray",
+    ".claude",
+    ".codex",
+    ".cursor",
+    ".devin",
+    ".opencode",
+    ".agents",
+    ".openclaw",
+    ".hermes",
+];
+
 pub fn discover(work_root: Option<&Path>, agent_dir: &Path) -> Vec<Skill> {
     let mut out = Vec::new();
-    scan_dir(&agent_dir.join("skills"), "user", &mut out);
+    let mut visited = std::collections::HashSet::new();
+    let mut scan = |dir: &Path, source: &str| scan_dir(dir, source, &mut out, &mut visited);
+    scan(&agent_dir.join("skills"), "user");
     if let Some(home) = dirs_home() {
-        scan_dir(&home.join(".agents").join("skills"), "user", &mut out);
-        let opencode = std::env::var("XDG_CONFIG_HOME")
+        scan(&home.join(".agents").join("skills"), "user");
+        let config_base = std::env::var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| home.join(".config"))
-            .join("opencode");
+            .unwrap_or_else(|_| home.join(".config"));
+        let opencode = config_base.join("opencode");
         if let Ok(entries) = fs::read_dir(&opencode) {
             let mut dirs: Vec<PathBuf> = vec![opencode.clone()];
             dirs.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
             for d in dirs {
-                scan_dir(&d.join("skills"), "user", &mut out);
+                scan(&d.join("skills"), "user");
             }
         } else {
-            scan_dir(&opencode.join("skills"), "user", &mut out);
+            scan(&opencode.join("skills"), "user");
+        }
+        scan(&config_base.join("devin").join("skills"), "user");
+        for rel in USER_AGENT_SKILL_DIRS {
+            scan(&home.join(rel), "user");
         }
     }
     if let Some(root) = work_root {
         let mut dir = Some(root.to_path_buf());
         while let Some(d) = dir {
-            for cfg in [".gray", ".claude", ".agents"] {
-                scan_dir(&d.join(cfg).join("skills"), "project", &mut out);
+            for cfg in PROJECT_SKILL_DIRS {
+                scan(&d.join(cfg).join("skills"), "project");
             }
             dir = d.parent().map(|p| p.to_path_buf());
         }
@@ -101,5 +139,16 @@ pub fn discover(work_root: Option<&Path>, agent_dir: &Path) -> Vec<Skill> {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    // Same precedence as `gray_core::paths::user_home` so the IDE and CLI
+    // resolve the same home when both HOME and USERPROFILE are set.
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
 }

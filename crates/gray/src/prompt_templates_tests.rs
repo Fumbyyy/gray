@@ -117,12 +117,25 @@ fn search_dirs_walk_to_the_git_root_then_user_dirs() {
 
 #[test]
 fn no_repo_means_only_the_cwd_is_project() {
-    // Under /tmp so a session TMPDIR inside a repo/dotfiles home can't
-    // hand us ancestors with a .git root to walk to.
-    let root = tempfile::Builder::new()
-        .prefix("gray-test-")
-        .tempdir_in("/tmp")
-        .unwrap_or_else(|_| tempfile::tempdir().unwrap());
+    // Outside the user profile so ancestors can't hand us a .git root to
+    // walk to; on Windows %TEMP% lives inside the profile, so fall back
+    // to machine-wide temp roots before tempfile::tempdir().
+    let mut roots = vec![std::path::PathBuf::from("/tmp")];
+    if let Some(windir) = std::env::var_os("WINDIR") {
+        roots.push(std::path::PathBuf::from(windir).join("Temp"));
+    }
+    if let Some(pd) = std::env::var_os("ProgramData") {
+        roots.push(std::path::PathBuf::from(pd));
+    }
+    let root = roots
+        .iter()
+        .find_map(|root| {
+            tempfile::Builder::new()
+                .prefix("gray-test-")
+                .tempdir_in(root)
+                .ok()
+        })
+        .unwrap_or_else(|| tempfile::tempdir().unwrap());
     let sub = root.path().join("a");
     std::fs::create_dir_all(&sub).unwrap();
     let dirs = search_dirs(&sub, None, None);

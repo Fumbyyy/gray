@@ -611,7 +611,7 @@ fn terminal_runs_shell_commands_in_project() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|l| l == "[exit 0]")
+            .any(|l| l.as_str().map(|x| x.trim() == "gray-e2e").unwrap_or(false))
     });
     let lines: Vec<&str> = s["terminal"]
         .as_array()
@@ -619,8 +619,8 @@ fn terminal_runs_shell_commands_in_project() {
         .iter()
         .filter_map(|l| l.as_str())
         .collect();
-    assert!(lines.contains(&"$ echo gray-e2e && pwd"));
-    assert!(lines.contains(&"gray-e2e"));
+    assert!(lines.iter().any(|l| l.contains("echo gray-e2e && pwd")));
+    assert!(lines.iter().any(|l| l.trim() == "gray-e2e"));
     assert!(lines.iter().any(|l| l.ends_with("/project")));
     g.screenshot("terminal");
     g.type_text("touch made-by-terminal.txt");
