@@ -1282,3 +1282,42 @@ fn resizable_sidebar_drag_widens_pane() {
             .unwrap_or(false)
     });
 }
+
+#[test]
+fn image_attachments_chip_send_and_clear() {
+    let Some(g) = Gray::start_with(
+        "attach",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    let png: [u8; 70] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x01, 0x02, 0x0A, 0x54, 0x46, 0x18, 0x4E, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    fs::write(g.project.join("shot.png"), png).unwrap();
+    g.send("/attach shot.png");
+    g.wait_for("attached", |s| {
+        s["attachments"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .any(|p| p.as_str().map(|p| p.ends_with("shot.png")).unwrap_or(false))
+            })
+            .unwrap_or(false)
+    });
+    g.screenshot("attachment-chip");
+    g.send("look at this");
+    g.wait_for("sent with image", |s| {
+        finished(s)
+            && s["attachments"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false)
+            && s["messages"].to_string().contains("Attached image")
+    });
+}

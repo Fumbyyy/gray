@@ -132,6 +132,8 @@ enum Cmd {
     TurnDiff,
     HeadDiff,
     Approve(bool),
+    AttachImage(String),
+    RemoveAttachment(usize),
     SettingsSection(String),
     SetLayout(String),
     SetTerminalPlacement(String),
@@ -178,6 +180,7 @@ pub struct GrayApp {
     gray_sessions: Vec<GraySession>,
     gray_cmds: Vec<(String, String)>,
     pending_approval: Option<(String, String)>,
+    attachments: Vec<PathBuf>,
     settings_section: String,
     settings_query: String,
     pane_sizes: Vec<f32>,
@@ -299,6 +302,7 @@ impl GrayApp {
             gray_sessions: Vec::new(),
             gray_cmds: Vec::new(),
             pending_approval: None,
+            attachments: Vec::new(),
             settings_section: "preferences".into(),
             settings_query: String::new(),
             pane_sizes: Vec::new(),
@@ -532,7 +536,11 @@ impl GrayApp {
             text: text.clone(),
             at: now(),
         });
-        let prompt = expand_mentions(&text, &root);
+        let mut prompt = expand_mentions(&text, &root);
+        for a in &self.attachments {
+            prompt.push_str(&format!("\n[Attached image: {}]", a.display()));
+        }
+        self.attachments.clear();
         let turn = provider::start(TurnRequest {
             provider: thread.provider.clone(),
             model: thread.model.clone(),
@@ -605,6 +613,7 @@ impl GrayApp {
             "gray" => Cmd::Gray(arg),
             "approve" => Cmd::Approve(true),
             "layout" => Cmd::SetLayout(arg),
+            "attach" | "image" => Cmd::AttachImage(arg),
             "autoaccept" => Cmd::SetAutoAccept(matches!(arg.as_str(), "on" | "true" | "1")),
             "reject" => Cmd::Approve(false),
             "turndiff" | "changes" => Cmd::TurnDiff,
@@ -1263,6 +1272,29 @@ impl GrayApp {
                     value: if b { "true" } else { "false" }.into(),
                 });
             }
+            Cmd::AttachImage(arg) => {
+                let rel = PathBuf::from(arg.trim());
+                let path = if rel.is_absolute() {
+                    rel
+                } else {
+                    match self.work_root() {
+                        Some(r) => r.join(rel),
+                        None => rel,
+                    }
+                };
+                if path.is_file() {
+                    if !self.attachments.contains(&path) {
+                        self.attachments.push(path);
+                    }
+                } else {
+                    self.toast(format!("No image at {}", path.display()), true);
+                }
+            }
+            Cmd::RemoveAttachment(i) => {
+                if i < self.attachments.len() {
+                    self.attachments.remove(i);
+                }
+            }
             Cmd::Approve(ok) => {
                 if let Some((tid, label)) = self.pending_approval.take() {
                     if let Some(t) = self.turns.get(&tid)
@@ -1834,6 +1866,7 @@ impl GrayApp {
             "auto_accept": self.store.state.setting("auto_accept", "false") == "true",
             "terminal_placement": self.store.state.setting("terminal_placement", "bottom"),
             "pane_sizes": self.pane_sizes,
+            "attachments": self.attachments.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "terminal": self.terminal_lines.iter().rev().take(40).rev().cloned().collect::<Vec<_>>(),
             "composer": self.composer.read(cx).value().to_string(),
             "toast": self.toast.as_ref().map(|t| t.0.clone()),
@@ -2642,6 +2675,62 @@ impl GrayApp {
                     .border_color(t.border)
                     .bg(t.popover)
                     .shadow_sm()
+                    .children(
+                        self.attachments
+                            .iter()
+                            .enumerate()
+                            .map(|(i, path)| {
+                                h_flex()
+                                    .id(SharedString::from(format!("attachment-{i}")))
+                                    .px_2()
+                                    .pt_2()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .w(px(44.))
+                                            .h(px(44.))
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(t.border)
+                                            .overflow_hidden()
+                                            .child(
+                                                img(path.clone())
+                                                    .w(px(44.))
+                                                    .h(px(44.))
+                                                    .object_fit(ObjectFit::Cover),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(t.muted_foreground)
+                                            .child(
+                                                path.file_name()
+                                                    .map(|n| n.to_string_lossy().to_string())
+                                                    .unwrap_or_default(),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "attach-remove-{i}"
+                                        )))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Close)
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.run(Cmd::RemoveAttachment(i), window, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>(),
+                    )
                     .child(
                         div()
                             .px_2()
