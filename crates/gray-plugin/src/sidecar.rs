@@ -44,13 +44,6 @@ pub const HOST_ASK: &str = "host/ask";
 
 pub const HOST_TTL: Duration = Duration::from_secs(30);
 
-#[doc(hidden)]
-pub const PLUGIN_MANIFEST: &str = "plugin/manifest";
-#[doc(hidden)]
-pub const PLUGIN_SHUTDOWN: &str = "plugin/shutdown";
-#[doc(hidden)]
-pub const MANIFEST_TTL: Duration = Duration::from_secs(30);
-
 pub const HOST_TOOLS_CHANGED: &str = "host/tools_changed";
 
 pub const TOOLS_CHANGED_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -241,8 +234,7 @@ fn finish_spawn(mut child: Child) -> anyhow::Result<(Child, ChildStdin, ChildStd
     Ok((child, stdin, stdout))
 }
 
-#[doc(hidden)]
-pub const MAX_FRAME: usize = 256 * 1024;
+const MAX_FRAME: usize = 256 * 1024;
 
 const MAX_HOST_TASKS: usize = 4;
 
@@ -697,7 +689,7 @@ impl SidecarPlugin {
         let (child, stdin, stdout) = spawn_child(&argv)?;
         let transport = Transport::new(child, stdin, stdout, argv.clone());
         let result = transport
-            .request(PLUGIN_MANIFEST, None, MANIFEST_TTL)
+            .request("plugin/manifest", None, Duration::from_secs(30))
             .await?;
         let mut manifest = Manifest::from_result(&result);
         let name = manifest.name.trim().to_string();
@@ -823,7 +815,7 @@ impl SidecarPlugin {
         if self.manifest.protocol.is_some() {
             let _ = self
                 .transport
-                .send_notification(PLUGIN_SHUTDOWN, json!({"reason": "session_end"}))
+                .send_notification("plugin/shutdown", json!({"reason": "session_end"}))
                 .await;
         }
         let mut child = self.transport.child.lock().await;
