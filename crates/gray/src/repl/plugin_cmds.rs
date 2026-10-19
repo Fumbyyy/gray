@@ -1,23 +1,4 @@
 use super::*;
-pub(crate) use crate::setup::marketplace::activation::ActivationChoice;
-
-#[derive(Default)]
-pub(crate) struct PluginCommandOutcome {
-    pub installed: Vec<String>,
-    pub activate_now: bool,
-}
-
-pub(crate) fn should_prompt(installed: &[String], agent_exists: bool) -> bool {
-    !installed.is_empty() && agent_exists
-}
-
-pub(crate) fn should_reload(
-    installed: &[String],
-    choice: ActivationChoice,
-    agent_exists: bool,
-) -> bool {
-    should_prompt(installed, agent_exists) && choice == ActivationChoice::Now
-}
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum PluginAction {
@@ -69,70 +50,26 @@ pub(crate) fn is_bare_plugin_cmd(raw: &str) -> bool {
     matches!(cmd.to_ascii_lowercase().as_str(), "plugin" | "plugins")
 }
 
-#[cfg(test)]
-thread_local! {
-    static TEST_PLUGIN_MODAL: std::cell::RefCell<Option<crate::setup::PluginModalOutcome>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn run_plugin_picker(
-    bg: Option<&crate::setup::BackgroundSnapshot>,
-) -> anyhow::Result<crate::setup::PluginModalOutcome> {
-    #[cfg(test)]
-    if let Some(outcome) = TEST_PLUGIN_MODAL.with_borrow_mut(Option::take) {
-        return Ok(outcome);
-    }
-    crate::setup::run_plugins_modal(bg)
-}
-
-pub(crate) async fn handle_plugin_command(
-    raw: &str,
-    tui: Option<&crate::composer::SharedTui>,
-    agent_exists: bool,
-) -> PluginCommandOutcome {
+pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::composer::SharedTui>) {
     if is_bare_plugin_cmd(raw) && tui.is_some() {
         let bg = tui.map(|s| s.lock().expect("tui lock").snapshot());
-        let result = with_modal_sync(tui, || run_plugin_picker(bg.as_ref()));
-        let mut command_outcome = PluginCommandOutcome::default();
+        let result = with_modal_sync(tui, || crate::setup::run_plugins_modal(bg.as_ref()));
         match result {
-            Ok(outcome) => {
-                command_outcome.installed = outcome.installed;
-                if outcome.changed {
-                    if let Some(shared) = tui {
-                        let mut t = shared.lock().expect("tui lock");
-                        t.push_action("Plugins updated", None);
-                        t.ensure_gap();
-                        let _ = t.draw();
-                    }
-                } else if let Some(shared) = tui {
+            Ok(true) => {
+                if let Some(shared) = tui {
                     let mut t = shared.lock().expect("tui lock");
-                    t.clear_draft();
+                    t.push_action("Plugins updated", None);
                     t.ensure_gap();
                     let _ = t.draw();
                 }
-                for warning in outcome.warnings {
-                    say(tui, &format!("Plugin install warning: {warning}"));
-                }
-                if should_prompt(&command_outcome.installed, agent_exists) {
-                    let bg = tui.map(|s| s.lock().expect("tui lock").snapshot());
-                    let choice = with_modal_sync(tui, || {
-                        crate::setup::marketplace::activation::prompt(
-                            bg.as_ref(),
-                            &command_outcome.installed,
-                        )
-                    });
-                    match choice {
-                        Ok(ActivationChoice::Now) => command_outcome.activate_now = true,
-                        Ok(ActivationChoice::Later) => {
-                            say(tui, "Plugins will load on the next start or reload.");
-                        }
-                        Err(e) => say(
-                            tui,
-                            &format!(
-                                "Activation prompt failed: {e}. Plugins will load on the next start or reload."
-                            ),
-                        ),
-                    }
+            }
+            Ok(false) => {
+                if let Some(shared) = tui {
+                    let mut t = shared.lock().expect("tui lock");
+                    t.clear_draft();
+
+                    t.ensure_gap();
+                    let _ = t.draw();
                 }
             }
             Err(e) => {
@@ -146,13 +83,13 @@ pub(crate) async fn handle_plugin_command(
                 }
             }
         }
-        return command_outcome;
+        return;
     }
     let action = match parse_plugin_args(raw) {
         Ok(a) => a,
         Err(e) => {
             say(tui, &format!("{e:#}"));
-            return PluginCommandOutcome::default();
+            return;
         }
     };
     match action {
@@ -236,7 +173,6 @@ pub(crate) async fn handle_plugin_command(
             }
         }
     }
-    PluginCommandOutcome::default()
 }
 
 #[path = "plugin_cmds_tests.rs"]

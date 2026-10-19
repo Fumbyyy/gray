@@ -93,12 +93,12 @@ pub struct Report {
     pub deps: Vec<String>,
 }
 
-fn read_lock() -> anyhow::Result<Option<LockFile>> {
-    read_lock_in(&crate::plugins_dir())
+fn lock_path() -> PathBuf {
+    crate::plugins_dir().join("lock.json")
 }
 
-pub(crate) fn read_lock_in(plugins: &Path) -> anyhow::Result<Option<LockFile>> {
-    match std::fs::read_to_string(plugins.join("lock.json")) {
+fn read_lock() -> anyhow::Result<Option<LockFile>> {
+    match std::fs::read_to_string(lock_path()) {
         Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
@@ -165,11 +165,7 @@ pub fn hold_registry_lock() -> anyhow::Result<Option<std::fs::File>> {
 }
 
 fn write_lock(lock: &LockFile) -> anyhow::Result<()> {
-    write_lock_in(&crate::plugins_dir(), lock)
-}
-
-pub(crate) fn write_lock_in(plugins: &Path, lock: &LockFile) -> anyhow::Result<()> {
-    let path = plugins.join("lock.json");
+    let path = lock_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

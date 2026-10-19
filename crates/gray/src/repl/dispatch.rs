@@ -20,10 +20,6 @@ pub(crate) async fn dispatch_command(
     unconfigured: &mut bool,
     hide_thinking: &mut bool,
 ) -> anyhow::Result<Flow> {
-    let cmd = match cmd {
-        ReplCommand::Plugins if tui.is_some() => ReplCommand::Plugin("/plugins".into()),
-        cmd => cmd,
-    };
     Ok(match cmd {
         ReplCommand::Empty | ReplCommand::Prompt(_) => Flow::Continue,
         ReplCommand::Quit => {
@@ -479,33 +475,32 @@ pub(crate) async fn dispatch_command(
         }
         ReplCommand::Skill(_) => Flow::Continue,
         ReplCommand::Plugin(raw) => {
-            let shared = tui.as_ref().map(|(s, _)| s);
-            let result = handle_plugin_command(&raw, shared, agent.is_some()).await;
-            let choice = if result.activate_now {
-                super::plugin_cmds::ActivationChoice::Now
-            } else {
-                super::plugin_cmds::ActivationChoice::Later
-            };
-            if super::plugin_cmds::should_reload(&result.installed, choice, agent.is_some()) {
-                let outcome = reload_agent(
-                    agent,
-                    config,
-                    cwd,
-                    session_state.as_ref().map(|s| s.session_id.as_str()),
-                    shared,
-                )
-                .await;
-                if !outcome.rebuilt {
-                    say(shared, "Plugins remain installed; activation failed.");
-                }
-                for warning in crate::take_profile_warnings() {
-                    say(shared, &format!("Plugin activation warning: {warning}"));
-                }
-            }
+            handle_plugin_command(&raw, tui.as_ref().map(|(s, _)| s)).await;
             Flow::Continue
         }
         ReplCommand::Plugins => {
-            say(None, &crate::plugin_status::table().await);
+            let tui_shared = tui.as_ref().map(|(s, _)| s);
+            if tui_shared.is_none() {
+                say(tui_shared, &crate::plugin_status::table().await);
+            } else {
+                let bg = tui_shared.map(|s| s.lock().expect("tui lock").snapshot());
+                let changed = with_modal_sync(tui_shared, || {
+                    crate::setup::run_plugins_manager(bg.as_ref())
+                });
+                match changed {
+                    Ok(true) => say(tui_shared, "plugins updated"),
+                    Ok(false) => {
+                        if let Some(shared) = tui_shared {
+                            let mut t = shared.lock().expect("tui lock");
+                            t.clear_draft();
+                            if !t.retract_slash_echo("/plugins") {
+                                let _ = t.draw();
+                            }
+                        }
+                    }
+                    Err(e) => say(tui_shared, &format!("plugins manager failed: {e}")),
+                }
+            }
             Flow::Continue
         }
         ReplCommand::Unknown(cmd) => {
@@ -631,15 +626,27 @@ pub(crate) async fn dispatch_command(
                                 if std::io::stdin().is_terminal()
                                     && std::io::stdout().is_terminal() =>
                             {
+                                let before = installed_plugin_names();
                                 let status = with_modal_sync(shared, || {
                                     super::maintenance::with_terminal(shared, || {
-                                        std::process::Command::new(prog).args(rest).status()
+                                        let mut child = std::process::Command::new(prog);
+                                        child.args(rest);
+                                        if let Ok(exe) = std::env::current_exe() {
+                                            child.env("GRAY_EXE", exe);
+                                        }
+                                        child.status()
                                     })
                                 });
                                 match status {
                                     Ok(s) if s.success() => {}
                                     Ok(s) => say(shared, &format!("{name} exited: {s}")),
                                     Err(e) => say(shared, &format!("{name}: {e}")),
+                                }
+                                if installed_plugin_names() != before {
+                                    let sid = session_state.as_ref().map(|s| s.session_id.as_str());
+                                    if reload_agent(agent, config, cwd, sid, shared).await {
+                                        say(shared, "plugins changed, reloaded");
+                                    }
                                 }
                             }
                             _ => say(
@@ -775,4 +782,13 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
     })
+}
+
+/// Installed plugin names from the user lock file, so a terminal handoff that
+/// installs or removes plugins (the account plugin's `/marketplace`) can
+/// activate them without a restart.
+fn installed_plugin_names() -> Option<std::collections::BTreeSet<String>> {
+    let home = gray_core::paths::gray_home()?;
+    let lock = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(&home)).ok()?;
+    Some(lock.plugins.into_keys().collect())
 }

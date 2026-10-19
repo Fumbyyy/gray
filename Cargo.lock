@@ -957,7 +957,6 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

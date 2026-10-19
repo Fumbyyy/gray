@@ -4,7 +4,6 @@ pub mod index;
 pub mod ops;
 pub mod skills_ops;
 pub mod sources;
-pub mod staged;
 
 use std::path::PathBuf;
 
