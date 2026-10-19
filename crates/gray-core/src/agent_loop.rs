@@ -1649,7 +1649,10 @@ fn parse_text_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
         let Some(js) = json_slice(text, brace) else {
             break;
         };
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(js) {
+        if let Some(v) = serde_json::from_str::<serde_json::Value>(js)
+            .ok()
+            .or_else(|| crate::agent_tools::repair_json_text(js))
+        {
             match name_override {
                 Some(n) if !n.is_empty() => out.push((n, v)),
                 _ => {
@@ -1681,9 +1684,10 @@ fn call_from_json(v: serde_json::Value) -> Option<(String, serde_json::Value)> {
         })
         .cloned()
         .map(|a| match a {
-            serde_json::Value::String(s) => {
-                serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s))
-            }
+            serde_json::Value::String(s) => serde_json::from_str(&s)
+                .ok()
+                .or_else(|| crate::agent_tools::repair_json_text(&s))
+                .unwrap_or(serde_json::Value::String(s)),
             other => other,
         })
         .unwrap_or_else(|| serde_json::json!({}));
@@ -1692,11 +1696,12 @@ fn call_from_json(v: serde_json::Value) -> Option<(String, serde_json::Value)> {
 
 const CALL_BLOCK_SALVAGE: &str = "__gray_call_block_salvaged";
 
+/// Element calls, dropped element count, original parse error.
+type CallBlock = (Vec<(String, serde_json::Value)>, usize, Option<String>);
+
 /// A fused call block decodes to (element calls, dropped elements, original
 /// parse error). Plain arrays with no call-shaped elements are not blocks.
-fn block_args(
-    v: &serde_json::Value,
-) -> Option<(Vec<(String, serde_json::Value)>, usize, Option<String>)> {
+fn block_args(v: &serde_json::Value) -> Option<CallBlock> {
     match v {
         serde_json::Value::Array(items) => {
             let mut calls = Vec::new();
@@ -1747,6 +1752,7 @@ fn salvage_call_block(text: &str) -> (Vec<(String, serde_json::Value)>, usize) {
             Some(js) => {
                 match serde_json::from_str::<serde_json::Value>(js)
                     .ok()
+                    .or_else(|| crate::agent_tools::repair_json_text(js))
                     .and_then(call_from_json)
                 {
                     Some(c) => calls.push(c),
