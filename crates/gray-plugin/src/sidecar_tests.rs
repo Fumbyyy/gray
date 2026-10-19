@@ -189,7 +189,7 @@ async fn prompt_context_carries_the_agent_session_id() {
 #[test]
 fn a_model_picker_reply_wins_over_prompt_and_text() {
     use gray_core::agent::CommandOutcome;
-    let parse = |v: serde_json::Value| super::command_outcome(&v);
+    let parse = |v: serde_json::Value| super::command_outcome(&v, &[]);
     assert_eq!(
         parse(serde_json::json!({"model_picker": "fusion", "text": "fallback"})),
         Some(CommandOutcome::ModelPicker("fusion".into()))
@@ -404,7 +404,7 @@ fn context_build_text_scrub_leaves_small_payloads_alone() {
 #[test]
 fn a_panel_reply_parses_and_wins_over_text() {
     use gray_core::agent::CommandOutcome;
-    let parse = |v: serde_json::Value| super::command_outcome(&v);
+    let parse = |v: serde_json::Value| super::command_outcome(&v, &[]);
     let Some(CommandOutcome::Panel(spec)) = parse(serde_json::json!({
         "panel": {
             "title": "Deploys",
@@ -447,7 +447,7 @@ fn a_panel_reply_parses_and_wins_over_text() {
 #[test]
 fn a_picker_reply_parses_and_wins_over_text() {
     use gray_core::agent::CommandOutcome;
-    let parse = |v: serde_json::Value| super::command_outcome(&v);
+    let parse = |v: serde_json::Value| super::command_outcome(&v, &[]);
     let Some(CommandOutcome::Picker(spec)) = parse(serde_json::json!({
         "picker": {
             "title": "Choose an agent",
@@ -472,7 +472,7 @@ fn a_picker_reply_parses_and_wins_over_text() {
 #[test]
 fn malformed_panel_and_picker_fall_back_to_text() {
     use gray_core::agent::CommandOutcome;
-    let parse = |v: serde_json::Value| super::command_outcome(&v);
+    let parse = |v: serde_json::Value| super::command_outcome(&v, &[]);
     assert_eq!(
         parse(serde_json::json!({"panel": {"pages": []}, "text": "show me"})),
         Some(CommandOutcome::Say("show me".into())),
@@ -495,4 +495,27 @@ fn malformed_panel_and_picker_fall_back_to_text() {
         }
         other => panic!("malformed picker without text yields an error line, got {other:?}"),
     }
+}
+
+#[test]
+fn a_terminal_reply_runs_the_plugin_binary_and_keeps_text_as_fallback() {
+    use gray_core::agent::CommandOutcome;
+    let plugin = vec!["/opt/gray-account".to_string()];
+    assert_eq!(
+        super::command_outcome(
+            &serde_json::json!({"terminal": ["cloud", "attach"], "text": "machine is up"}),
+            &plugin,
+        ),
+        Some(CommandOutcome::Terminal {
+            argv: vec!["/opt/gray-account".into(), "cloud".into(), "attach".into()],
+            text: Some("machine is up".into()),
+        })
+    );
+    assert_eq!(
+        super::command_outcome(
+            &serde_json::json!({"terminal": ["cloud"], "text": "machine is up"}),
+            &[],
+        ),
+        Some(CommandOutcome::Say("machine is up".into()))
+    );
 }

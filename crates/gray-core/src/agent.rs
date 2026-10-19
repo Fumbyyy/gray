@@ -431,6 +431,11 @@ pub enum CommandOutcome {
     Panel(PanelSpec),
 
     Picker(PickerSpec),
+
+    Terminal {
+        argv: Vec<String>,
+        text: Option<String>,
+    },
 }
 
 #[async_trait]
