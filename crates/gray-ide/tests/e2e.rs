@@ -1321,3 +1321,35 @@ fn image_attachments_chip_send_and_clear() {
             && s["messages"].to_string().contains("Attached image")
     });
 }
+
+#[test]
+fn skills_panel_lists_and_pastes_skill() {
+    let Some(g) = Gray::start_with(
+        "skills",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    let dir = g.project.join(".gray/skills/test-skill");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: test-skill\ndescription: does the test thing\n---\nwrite skill.txt ok\n",
+    )
+    .unwrap();
+    g.send("/skills");
+    g.wait_for("skill listed", |s| {
+        s["skills"].to_string().contains("test-skill")
+    });
+    g.screenshot("skills-panel");
+    g.palette("Use skill: test-skill");
+    g.wait_for("composer has body", |s| {
+        s["composer"].to_string().contains("skill.txt")
+    });
+    g.xdo(&["key", "Return"]);
+    g.wait_for("skill run", |s| {
+        finished(s) && s["messages"].to_string().contains("write skill.txt")
+    });
+    assert!(g.project.join("skill.txt").exists());
+}

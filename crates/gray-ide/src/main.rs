@@ -6,6 +6,7 @@ mod graycmds;
 mod plugins;
 mod provider;
 mod sessions;
+mod skills;
 mod store;
 mod workspace;
 

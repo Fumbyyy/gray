@@ -80,6 +80,7 @@ enum Panel {
     Plugins,
     Viewer,
     Sessions,
+    Skills,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -126,6 +127,8 @@ enum Cmd {
     ToggleViewer,
     PreviewFile(String),
     ToggleSessions,
+    ToggleSkills,
+    UseSkill(String),
     ResumeSession(String),
     DiscardChanges,
     Gray(String),
@@ -181,6 +184,7 @@ pub struct GrayApp {
     gray_cmds: Vec<(String, String)>,
     pending_approval: Option<(String, String)>,
     attachments: Vec<PathBuf>,
+    skills: Vec<crate::skills::Skill>,
     settings_section: String,
     settings_query: String,
     pane_sizes: Vec<f32>,
@@ -303,6 +307,7 @@ impl GrayApp {
             gray_cmds: Vec::new(),
             pending_approval: None,
             attachments: Vec::new(),
+            skills: Vec::new(),
             settings_section: "preferences".into(),
             settings_query: String::new(),
             pane_sizes: Vec::new(),
@@ -609,6 +614,7 @@ impl GrayApp {
             "background" | "bg" => Cmd::SetBackground(arg),
             "view" | "preview" => Cmd::PreviewFile(arg),
             "sessions" => Cmd::ToggleSessions,
+            "skills" => Cmd::ToggleSkills,
             "resume" => Cmd::ResumeSession(arg),
             "gray" => Cmd::Gray(arg),
             "approve" => Cmd::Approve(true),
@@ -900,6 +906,14 @@ impl GrayApp {
         items.push((k("Create checkpoint"), k("Git"), Cmd::Checkpoint));
         items.push((k("Plugins"), k("Ctrl+Shift+P"), Cmd::TogglePlugins));
         items.push((k("Sessions"), k("Gray"), Cmd::ToggleSessions));
+        items.push((k("Skills"), k("Gray"), Cmd::ToggleSkills));
+        for sk in &self.skills {
+            items.push((
+                format!("Use skill: {}", sk.name),
+                sk.source.clone(),
+                Cmd::UseSkill(sk.name.clone()),
+            ));
+        }
         for gs in self.gray_sessions.iter().take(10) {
             items.push((
                 format!("Resume session: {}", gs.id),
@@ -1586,6 +1600,31 @@ impl GrayApp {
                     self.preview_file(&rel, window, cx);
                 }
             }
+            Cmd::ToggleSkills => {
+                self.panel = if self.panel == Some(Panel::Skills) {
+                    None
+                } else {
+                    Some(Panel::Skills)
+                };
+                if self.panel == Some(Panel::Skills) {
+                    let agent_dir = crate::data_dir()
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(crate::data_dir);
+                    self.skills = crate::skills::discover(self.work_root().as_deref(), &agent_dir);
+                }
+            }
+            Cmd::UseSkill(name) => {
+                if let Some(sk) = self.skills.iter().find(|sk| sk.name == *name) {
+                    let text = if sk.body.is_empty() {
+                        format!("Use the {} skill.", sk.name)
+                    } else {
+                        sk.body.clone()
+                    };
+                    self.composer
+                        .update(cx, |s, cx| s.set_value(text, window, cx));
+                }
+            }
             Cmd::ToggleSessions => {
                 self.panel = if self.panel == Some(Panel::Sessions) {
                     None
@@ -1886,6 +1925,7 @@ impl GrayApp {
             "terminal_placement": self.store.state.setting("terminal_placement", "bottom"),
             "pane_sizes": self.pane_sizes,
             "attachments": self.attachments.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "skills": self.skills.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
             "terminal": self.terminal_lines.iter().rev().take(40).rev().cloned().collect::<Vec<_>>(),
             "composer": self.composer.read(cx).value().to_string(),
             "toast": self.toast.as_ref().map(|t| t.0.clone()),
@@ -2979,6 +3019,13 @@ impl GrayApp {
                         cx,
                     ))
                     .child(icon_btn(
+                        "rail-skills",
+                        IconName::BookOpen,
+                        "Skills",
+                        Cmd::ToggleSkills,
+                        cx,
+                    ))
+                    .child(icon_btn(
                         "rail-settings",
                         IconName::Settings,
                         "Settings (Ctrl+,)",
@@ -3130,6 +3177,7 @@ impl GrayApp {
             );
         let body: AnyElement = match panel {
             Panel::Sessions => self.render_sessions(cx).into_any_element(),
+            Panel::Skills => self.render_skills(cx).into_any_element(),
             Panel::Viewer => self.render_viewer(cx).into_any_element(),
             Panel::Plugins => self.render_plugins(cx).into_any_element(),
             Panel::Diff => match &self.diff {
@@ -3899,6 +3947,73 @@ impl GrayApp {
 }
 
 impl GrayApp {
+    fn render_skills(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let mut rows = v_flex().gap_0p5();
+        for sk in &self.skills {
+            let name = sk.name.clone();
+            rows = rows.child(
+                h_flex()
+                    .id(SharedString::from(format!("skill-{}", sk.name)))
+                    .px_3()
+                    .py_2()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .font_family(t.mono_font_family.clone())
+                                            .text_xs()
+                                            .child(sk.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_family(t.mono_font_family.clone())
+                                            .text_color(t.info)
+                                            .child(sk.source.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .truncate()
+                                    .child(sk.description.clone()),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("use-skill-{}", sk.name)))
+                            .ghost()
+                            .xsmall()
+                            .label("Use")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.run(Cmd::UseSkill(name.clone()), window, cx)
+                            })),
+                    ),
+            );
+        }
+        if self.skills.is_empty() {
+            rows = rows.child(
+                div()
+                    .px_3()
+                    .py_6()
+                    .text_sm()
+                    .text_color(t.muted_foreground)
+                    .child("No skills found. Add SKILL.md files under .gray/skills/ in this project or ~/.gray/skills/."),
+            );
+        }
+        rows
+    }
+
     fn render_sessions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let mut rows = v_flex().gap_0p5();
