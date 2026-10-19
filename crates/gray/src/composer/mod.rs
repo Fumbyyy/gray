@@ -316,7 +316,7 @@ pub struct Tui {
     pub(crate) plugin_stats: Option<String>,
 
     pub(crate) home_update: Option<String>,
-    pub(crate) home_qol: Option<String>,
+    pub(crate) home_quality_of_life: Option<String>,
 
     pub(crate) home_session: Option<String>,
 
@@ -338,8 +338,6 @@ pub(crate) struct AskModal {
 #[derive(Clone, Debug)]
 pub(crate) struct LiveTool {
     pub(crate) id: String,
-
-    pub(crate) name: String,
     pub(crate) header: Vec<Line<'static>>,
     pub(crate) running: bool,
     pub(crate) tail: LiveToolTail,
@@ -385,9 +383,13 @@ impl LiveToolTail {
     }
 
     fn rows(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.lines.iter().cloned().collect();
+        let mut out: Vec<String> = self
+            .lines
+            .iter()
+            .map(|l| crate::tool_fmt::expand_tabs(l))
+            .collect();
         if !self.carry.trim().is_empty() {
-            out.push(self.carry.clone());
+            out.push(crate::tool_fmt::expand_tabs(&self.carry));
         }
         if out.len() > LIVE_TAIL_LINES {
             out.drain(..out.len() - LIVE_TAIL_LINES);
@@ -918,7 +920,7 @@ impl Tui {
             home_notice: None,
             plugin_stats: None,
             home_update: None,
-            home_qol: None,
+            home_quality_of_life: None,
             home_session: None,
             left_home: false,
             intro_started: intro,
@@ -1091,8 +1093,9 @@ impl Tui {
                     self.record_rows(lines.clone());
                     self.insert_paragraph(&lines, Some(crate::theme::theme().window_bg));
                 }
-                TranscriptEntry::UserPrompt(text, _) => {
-                    let lines = crate::composer::transcript::format_user_prompt_lines(text, w);
+                TranscriptEntry::UserPrompt(text, attached) => {
+                    let lines =
+                        crate::composer::transcript::format_user_prompt_lines(text, attached, w);
                     self.emit_rows(lines, Some(crate::theme::theme().surface_bg));
                 }
                 TranscriptEntry::ToolBox { header, body } => {
@@ -1159,6 +1162,12 @@ impl Tui {
         true
     }
 
+    pub(crate) fn start_fresh_conversation(&mut self) {
+        self.history_entries = vec![TranscriptEntry::Welcome];
+        self.left_home = false;
+        self.reflow_on_resize(self.last_width);
+    }
+
     pub fn set_model(&mut self, model: String) {
         self.model_name = model;
     }
@@ -1171,8 +1180,8 @@ impl Tui {
         self.plugin_stats = stats;
     }
 
-    pub fn set_home_qol(&mut self, line: Option<String>) {
-        self.home_qol = line;
+    pub fn set_home_quality_of_life(&mut self, line: Option<String>) {
+        self.home_quality_of_life = line;
     }
 
     pub fn set_home_update(&mut self, notice: Option<String>) {
@@ -1289,20 +1298,13 @@ impl Tui {
         self.turn_billed_output = Some(output_tokens);
     }
 
-    pub(crate) fn upsert_live_tool(
-        &mut self,
-        id: &str,
-        name: &str,
-        header: Vec<Line<'static>>,
-        running: bool,
-    ) {
+    pub(crate) fn upsert_live_tool(&mut self, id: &str, header: Vec<Line<'static>>, running: bool) {
         if let Some(slot) = self.live_tools.iter_mut().find(|t| t.id == id) {
             slot.header = header;
             slot.running = running;
         } else {
             self.live_tools.push(LiveTool {
                 id: id.to_string(),
-                name: name.to_string(),
                 header,
                 running,
                 tail: LiveToolTail::default(),
@@ -1713,7 +1715,7 @@ impl Tui {
             home_notice: self.home_notice.clone(),
             plugin_stats: self.plugin_stats.clone(),
             home_update: self.home_update.clone(),
-            home_qol: self.home_qol.clone(),
+            home_quality_of_life: self.home_quality_of_life.clone(),
             home_session: self.home_session.clone(),
             attachments: self.attachments.clone(),
         }
@@ -1764,6 +1766,7 @@ impl Tui {
         self.background_closed = true;
         let _ = self.hide_background();
         self.background = None;
+        crate::quality_of_life::kitty::flush_transmits();
 
         self.gap_owed = true;
         self.pay_gap();
@@ -1782,6 +1785,7 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
+        crate::quality_of_life::kitty::flush_transmits();
         let _ = self.hide_background();
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
@@ -1808,5 +1812,9 @@ mod compaction_tests;
 #[path = "mod_palette_tests.rs"]
 #[cfg(test)]
 mod palette_tests;
+
+#[path = "mod_fresh_conversation_tests.rs"]
+#[cfg(test)]
+mod fresh_conversation_tests;
 
 mod background;

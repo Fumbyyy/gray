@@ -20,7 +20,7 @@ use crate::shell::exit::exit_report;
 use crate::shell::fence::fence;
 use crate::shell::kill::term_then_kill;
 use crate::shell::pump::{Pump, now_grindmill};
-use crate::shell::spawn::spawn;
+use crate::shell::spawn::{PluginEnv, spawn};
 use crate::shell::view::{
     format_elapsed, header, middle_out, resume_hint, squeeze as squeeze_view,
 };
@@ -73,11 +73,20 @@ pub struct BashTool {
     cwd: Mutex<BTreeMap<String, (PathBuf, PathBuf)>>,
 
     ledger: Option<Arc<crate::ledger::FileLedger>>,
+
+    plugin_env: PluginEnv,
 }
 
 impl BashTool {
     pub fn with_ledger(mut self, ledger: Arc<crate::ledger::FileLedger>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// Environment contributed by enabled plugins (`shell_env` manifests);
+    /// merged once when the registry is built.
+    pub fn with_plugin_env(mut self, env: PluginEnv) -> Self {
+        self.plugin_env = env;
         self
     }
 
@@ -192,6 +201,7 @@ impl Tool for BashTool {
             ctx.session_id.as_deref(),
             Some(&cwd_report),
             ps_report.as_deref(),
+            Some(&self.plugin_env),
         ) {
             Ok(s) => s,
             Err(e) => return fail(format!("failed to spawn shell: {e}")),
@@ -247,12 +257,6 @@ fn tool_def(jobs: bool) -> ToolDef {
         );
     }
 
-    const CRON: &str = if cfg!(windows) {
-        ""
-    } else {
-        " To come back at a time instead, `gray cron add \"in 30m\" \"<note to self>\" --reminder` \
-         wakes this session (or posts back to this chat); don't run `cron serve`/`tick` to wait for it."
-    };
     let default = default_timeout();
     ToolDef::new(
         "bash",
@@ -263,7 +267,7 @@ fn tool_def(jobs: bool) -> ToolDef {
              To wait for it, end your turn: a finished job wakes you, no polling needed. Peek with \
              `tail <log>`. A command that exits while leaving its process group alive (`nohup ... &`, \
              `cmd &`) is registered as a background job the same way. If a command sleeps, pass a `timeout` longer than the sleep. For a hard \
-             limit, write `timeout N cmd` yourself. {VIEW}{CRON}"
+             limit, write `timeout N cmd` yourself. {VIEW}"
         ),
         json!({
             "type": "object",
@@ -924,8 +928,7 @@ fn media_dump_refusal(command: &str, cwd: &Path) -> Option<String> {
             if !bare_missing {
                 return Some(format!(
                     "refused: `{t} {arg}` would dump raw media bytes into context. \
-                     Attach the file instead — a bare `cat {arg}` shows it to the model; \
-                     if this model has no image input, use the `modlens` skill."
+                     Attach the file instead — a bare `cat {arg}` shows it to the model."
                 ));
             }
         }
@@ -1021,6 +1024,7 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
         is_error: false,
         images,
         media,
+        usage: None,
     })
 }
 

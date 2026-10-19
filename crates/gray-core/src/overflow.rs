@@ -84,10 +84,46 @@ pub fn is_silent_overflow(usage: &Usage, stop: StopReason, window: usize) -> boo
     if window == 0 {
         return false;
     }
-    let input = usage.input_tokens + usage.cache_read_input_tokens;
+    // `input_tokens` already counts cached reads and writes on every provider
+    // (see `Usage::normalize`); adding `cache_read` again fired at half the window.
+    let input = usage.input_tokens.max(
+        usage.non_cached_input_tokens
+            + usage.cache_read_input_tokens
+            + usage.cache_write_input_tokens,
+    );
     match stop {
         StopReason::EndTurn => input > window,
         StopReason::MaxTokens => usage.output_tokens == 0 && input >= window * 99 / 100,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage(input: usize, cache_read: usize) -> Usage {
+        let mut u = Usage {
+            input_tokens: input,
+            cache_read_input_tokens: cache_read,
+            ..Usage::default()
+        };
+        u.normalize();
+        u
+    }
+
+    #[test]
+    fn silent_overflow_does_not_count_cached_tokens_twice() {
+        // A real turn: 136k prompt, 135k of it cached, on a 256k window.
+        assert!(!is_silent_overflow(
+            &usage(136_162, 135_288),
+            StopReason::EndTurn,
+            256_000
+        ));
+        assert!(is_silent_overflow(
+            &usage(257_000, 250_000),
+            StopReason::EndTurn,
+            256_000
+        ));
     }
 }

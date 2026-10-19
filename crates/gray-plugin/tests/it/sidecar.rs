@@ -643,3 +643,156 @@ done
     p.shutdown(std::time::Duration::from_secs(2)).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn write_exit_after_manifest_script(
+    dir: &std::path::Path,
+    code: i32,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let runs = dir.join("runs.log");
+    let first = dir.join("first.marker");
+    let script = dir.join(format!("exit{code}.sh"));
+    let body = format!(
+        r#"#!/bin/sh
+RUNS="{runs}"
+FIRST="{first}"
+echo run >> "$RUNS"
+if [ -f "$FIRST" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"id"'*)
+        id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9][0-9]*\).*/\1/')
+        printf '{{"id":%s,"result":{{}}}}\n' "$id"
+        ;;
+    esac
+  done
+else
+  touch "$FIRST"
+  while IFS= read -r line; do
+    case "$line" in
+      *plugin/manifest*)
+        id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9][0-9]*\).*/\1/')
+        printf '{{"id":%s,"result":{{"name":"exit{code}","version":"0.1.0","protocol":"1.1","tools":[]}}}}\n' "$id"
+        exit {code}
+        ;;
+    esac
+  done
+fi
+"#,
+        runs = runs.display(),
+        first = first.display(),
+        code = code
+    );
+    let staging = dir.join(format!("exit{code}.sh.new"));
+    std::fs::write(&staging, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::rename(&staging, &script).unwrap();
+    (script, runs)
+}
+
+async fn drive_until_respawned(p: &SidecarPlugin, runs: &std::path::Path) {
+    use gray_core::event::Usage;
+    use gray_plugin::CoreEvent;
+    let t = std::time::Instant::now();
+    loop {
+        p.on_event(CoreEvent::TurnEnd {
+            usage: Usage::default(),
+        })
+        .await;
+        let n = std::fs::read_to_string(runs)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        if n >= 2 {
+            return;
+        }
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(10),
+            "sidecar was not respawned; runs: {n}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn clean_exit_respawns_without_host_say() {
+    use gray_plugin::HostHandler;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("gray-exit0-{}-{}", std::process::id(), n));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (script, runs) = write_exit_after_manifest_script(&dir, 0);
+    let p = SidecarPlugin::spawn(vec![script.to_string_lossy().to_string()])
+        .await
+        .unwrap();
+
+    let seen: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    let handler: HostHandler = Arc::new(move |method: String, params: serde_json::Value| {
+        let seen2 = seen2.clone();
+        Box::pin(async move {
+            seen2.lock().expect("seen lock").push((method, params));
+            serde_json::json!({"ok": true})
+        })
+    });
+    p.set_host_handler(handler).await;
+
+    drive_until_respawned(&p, &runs).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let seen = seen.lock().expect("seen lock").clone();
+    assert!(
+        seen.iter().all(|(m, _)| m != "host/say"),
+        "a clean exit must not produce a host/say notice, got {seen:?}"
+    );
+    p.shutdown(std::time::Duration::from_secs(2)).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn nonzero_exit_respawns_with_one_plugin_crash_say() {
+    use gray_plugin::HostHandler;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("gray-exit1-{}-{}", std::process::id(), n));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (script, runs) = write_exit_after_manifest_script(&dir, 1);
+    let p = SidecarPlugin::spawn(vec![script.to_string_lossy().to_string()])
+        .await
+        .unwrap();
+
+    let seen: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    let handler: HostHandler = Arc::new(move |method: String, params: serde_json::Value| {
+        let seen2 = seen2.clone();
+        Box::pin(async move {
+            seen2.lock().expect("seen lock").push((method, params));
+            serde_json::json!({"ok": true})
+        })
+    });
+    p.set_host_handler(handler).await;
+
+    drive_until_respawned(&p, &runs).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let seen = seen.lock().expect("seen lock").clone();
+    let says: Vec<_> = seen.iter().filter(|(m, _)| m == "host/say").collect();
+    assert_eq!(says.len(), 1, "expected exactly one host/say, got {seen:?}");
+    let params = &says[0].1;
+    assert_eq!(params["kind"], "plugin_crash");
+    assert_eq!(params["plugin"], "exit1");
+    assert_eq!(params["status"], "exit 1");
+    assert_eq!(params["restarted"], true);
+    assert!(
+        params["text"].as_str().is_some_and(|t| t.contains("exit1")),
+        "fallback text should name the plugin: {params}"
+    );
+    p.shutdown(std::time::Duration::from_secs(2)).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

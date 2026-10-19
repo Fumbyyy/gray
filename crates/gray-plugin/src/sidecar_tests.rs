@@ -189,7 +189,7 @@ async fn prompt_context_carries_the_agent_session_id() {
 #[test]
 fn a_model_picker_reply_wins_over_prompt_and_text() {
     use gray_core::agent::CommandOutcome;
-    let parse = |v: serde_json::Value| super::command_outcome(&v);
+    let parse = |v: serde_json::Value| super::command_outcome(&v, &[]);
     assert_eq!(
         parse(serde_json::json!({"model_picker": "fusion", "text": "fallback"})),
         Some(CommandOutcome::ModelPicker("fusion".into()))
@@ -398,5 +398,124 @@ fn context_build_text_scrub_leaves_small_payloads_alone() {
     assert_eq!(
         wire[0].content[0],
         gray_core::message::ContentBlock::Text { text: "hi".into() }
+    );
+}
+
+#[test]
+fn a_panel_reply_parses_and_wins_over_text() {
+    use gray_core::agent::CommandOutcome;
+    let parse = |v: serde_json::Value| super::command_outcome(&v, &[]);
+    let Some(CommandOutcome::Panel(spec)) = parse(serde_json::json!({
+        "panel": {
+            "title": "Deploys",
+            "refreshable": true,
+            "pages": [
+                {
+                    "tab": "Prod",
+                    "title": "Prod deploys",
+                    "lines": [
+                        [{"text": "api", "style": {"fg": "success", "bold": true}}],
+                        [{"text": "ok"}, {"text": " done", "style": {"dim": true}}]
+                    ]
+                },
+                {"tab": "Dev", "title": "Dev deploys", "lines": [[{"text": "quiet"}]]}
+            ]
+        },
+        "text": "loses"
+    })) else {
+        panic!("panel must win over text")
+    };
+    assert_eq!(spec.title, "Deploys");
+    assert!(spec.refreshable);
+    assert_eq!(spec.pages.len(), 2);
+    assert_eq!(spec.pages[0].tab, "Prod");
+    let span = &spec.pages[0].lines[0][0];
+    assert_eq!(span.text, "api");
+    let style = span.style.as_ref().expect("styled span");
+    assert_eq!(style.fg.as_deref(), Some("success"));
+    assert!(style.bold);
+    assert!(!style.italic && !style.dim);
+    assert!(
+        spec.pages[0].lines[1][1]
+            .style
+            .as_ref()
+            .is_some_and(|s| s.dim)
+    );
+    assert!(spec.pages[1].lines[0][0].style.is_none());
+}
+
+#[test]
+fn a_picker_reply_parses_and_wins_over_text() {
+    use gray_core::agent::CommandOutcome;
+    let parse = |v: serde_json::Value| super::command_outcome(&v, &[]);
+    let Some(CommandOutcome::Picker(spec)) = parse(serde_json::json!({
+        "picker": {
+            "title": "Choose an agent",
+            "selected_id": "b",
+            "items": [
+                {"id": "a", "label": "alpha"},
+                {"id": "b", "label": "beta", "description": "the second one"}
+            ]
+        },
+        "text": "loses"
+    })) else {
+        panic!("picker must win over text")
+    };
+    assert_eq!(spec.title, "Choose an agent");
+    assert_eq!(spec.selected_id.as_deref(), Some("b"));
+    assert_eq!(spec.items.len(), 2);
+    assert_eq!(spec.items[0].id, "a");
+    assert_eq!(spec.items[0].description, None);
+    assert_eq!(spec.items[1].description.as_deref(), Some("the second one"));
+}
+
+#[test]
+fn malformed_panel_and_picker_fall_back_to_text() {
+    use gray_core::agent::CommandOutcome;
+    let parse = |v: serde_json::Value| super::command_outcome(&v, &[]);
+    assert_eq!(
+        parse(serde_json::json!({"panel": {"pages": []}, "text": "show me"})),
+        Some(CommandOutcome::Say("show me".into())),
+        "panel without a title is malformed — text wins"
+    );
+    assert_eq!(
+        parse(serde_json::json!({"picker": {"title": "x"}, "text": "pick later"})),
+        Some(CommandOutcome::Say("pick later".into())),
+        "picker without items is malformed — text wins"
+    );
+    match parse(serde_json::json!({"panel": {"title": 7}})) {
+        Some(CommandOutcome::Say(line)) => {
+            assert!(line.contains("invalid panel result"), "{line}")
+        }
+        other => panic!("malformed panel without text yields an error line, got {other:?}"),
+    }
+    match parse(serde_json::json!({"picker": "not-an-object"})) {
+        Some(CommandOutcome::Say(line)) => {
+            assert!(line.contains("invalid picker result"), "{line}")
+        }
+        other => panic!("malformed picker without text yields an error line, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_terminal_reply_runs_the_plugin_binary_and_keeps_text_as_fallback() {
+    use gray_core::agent::CommandOutcome;
+    let plugin = vec!["/opt/gray-account".to_string()];
+    assert_eq!(
+        super::command_outcome(
+            &serde_json::json!({"terminal": ["cloud", "attach"], "text": "machine is up"}),
+            &plugin,
+        ),
+        Some(CommandOutcome::Terminal {
+            argv: vec!["/opt/gray-account".into(), "cloud".into(), "attach".into()],
+            text: Some("machine is up".into()),
+        })
+    );
+    assert_eq!(
+        super::command_outcome(
+            &serde_json::json!({"terminal": ["cloud"], "text": "machine is up"}),
+            &[],
+        ),
+        Some(CommandOutcome::Say("machine is up".into()))
     );
 }

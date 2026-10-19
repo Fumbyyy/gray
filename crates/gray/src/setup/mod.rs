@@ -68,9 +68,9 @@ pub(crate) use catalog::save_auth_key;
 pub use catalog::{
     AUTH_MODE_API_KEY, AUTH_MODE_NONE, Catalog, CatalogProvider, ConnectAuth, ConnectItem,
     PROVIDERS_JSON, SavedConfig, auto_update_enabled, auto_update_enabled_at, build_connect_items,
-    cron_auto_enabled, cron_auto_enabled_at, disabled_skill_names, gray_home, gw_auto_enabled,
-    gw_auto_enabled_at, intro_enabled, load_auth_keys, load_catalog, load_saved_config_at,
-    lock_saved_config_at, mask_key_pretty, normalize_custom_base_url, qol_enabled, qol_enabled_at,
+    disabled_skill_names, gray_home, gw_auto_enabled, gw_auto_enabled_at, intro_enabled,
+    load_auth_keys, load_catalog, load_saved_config_at, lock_saved_config_at, mask_key_pretty,
+    normalize_custom_base_url, quality_of_life_enabled, quality_of_life_enabled_at,
     save_saved_config_at, saved_config_path, skills_auto_enabled, skills_auto_enabled_at,
 };
 
@@ -103,6 +103,7 @@ pub mod icons;
 pub use icons::icon;
 pub mod tabs;
 
+pub(crate) mod composite_rows;
 mod context_modal;
 mod install_manager;
 mod model_modal;
@@ -170,7 +171,7 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
         2,
     );
     print!("\r\n");
-    let detected = crate::qol::detect::first_run_detected();
+    let detected = crate::quality_of_life::detect::first_run_detected();
     if !detected.is_empty() {
         let names = detected
             .iter()
@@ -195,7 +196,7 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
         let _ = crossterm::terminal::disable_raw_mode();
         print!("\r\n");
         if matches!(key, Some(k) if matches!(k.code, KeyCode::Char('i') | KeyCode::Char('I'))) {
-            crate::qol::detect::set_pending_setup(true);
+            crate::quality_of_life::detect::set_pending_setup(true);
         }
     }
 

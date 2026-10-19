@@ -256,8 +256,9 @@ fn handle_usage_inner(
                 };
                 usage_panel::usage_pages(&input, &collect_subscription_usage())
             };
-            let opened =
-                super::with_modal_sync(tui, || usage_panel::run_usage_modal(&mut rebuild, &bg));
+            let opened = super::with_modal_sync(tui, || {
+                super::pager::run_pager(rebuild(), Some(&mut rebuild), &bg)
+            });
             if opened.is_ok() {
                 return;
             }
@@ -418,7 +419,7 @@ pub(crate) async fn handle_context_window(
             if ok {
                 t.push_action("Context updated", Some(&msg));
             } else {
-                super::cron::push_notice(&mut t, "Context update failed", &msg, true);
+                super::notice::push_notice(&mut t, "Context update failed", &msg, true);
             }
             t.ensure_gap();
             let _ = t.draw();
@@ -756,7 +757,7 @@ pub(crate) async fn handle_compact(
     let messages = ag.messages().to_vec();
     if messages.is_empty() {
         if let Some(shared) = tui {
-            super::cron::push_notice(
+            super::notice::push_notice(
                 &mut shared.lock().expect("tui lock"),
                 "Nothing to compact",
                 "conversation is empty",
@@ -782,7 +783,7 @@ pub(crate) async fn handle_compact(
     let watch_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let key_watcher = tui.map(|shared| {
         crate::repl::key_watcher::spawn_key_watcher_with_typing(
-            watch_cancel,
+            watch_cancel.clone(),
             watch_stop.clone(),
             Some(shared.clone()),
             cwd.to_path_buf(),
@@ -790,12 +791,14 @@ pub(crate) async fn handle_compact(
         )
     });
 
-    let compact_res = crate::compact::compact_with_keep(
-        ag,
-        custom_instructions.as_deref(),
-        crate::setup::user_keep_recent_tokens(),
-    )
-    .await;
+    let compact_res = tokio::select! {
+        _ = watch_cancel.cancelled() => None,
+        r = crate::compact::compact_with_keep(
+            ag,
+            custom_instructions.as_deref(),
+            crate::setup::user_keep_recent_tokens(),
+        ) => Some(r),
+    };
 
     watch_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(watcher) = key_watcher {
@@ -811,6 +814,15 @@ pub(crate) async fn handle_compact(
         })
         .unwrap_or_default();
     let elapsed_str = crate::composer::fmt_elapsed_compact(elapsed.as_secs());
+
+    let Some(compact_res) = compact_res else {
+        if let Some(shared) = tui {
+            let mut t = shared.lock().expect("tui lock");
+            t.push_dim("■ compaction cancelled".to_string());
+            t.ensure_gap();
+        }
+        return;
+    };
 
     match compact_res {
         Ok(Some(summary)) => {
@@ -851,7 +863,7 @@ pub(crate) async fn handle_compact(
         }
         Ok(None) => {
             if let Some(shared) = tui {
-                super::cron::push_notice(
+                super::notice::push_notice(
                     &mut shared.lock().expect("tui lock"),
                     "Nothing to compact",
                     "conversation already fits in context",
@@ -866,7 +878,7 @@ pub(crate) async fn handle_compact(
         }
         Err(e) => {
             if let Some(shared) = tui {
-                super::cron::push_notice(
+                super::notice::push_notice(
                     &mut shared.lock().expect("tui lock"),
                     "Compaction failed",
                     &e.to_string(),

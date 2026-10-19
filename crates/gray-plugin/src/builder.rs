@@ -28,7 +28,9 @@ pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
 
     let ledger = Arc::new(gray_tools::FileLedger::new());
     let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(
-        gray_tools::BashTool::default().with_ledger(ledger.clone()),
+        gray_tools::BashTool::default()
+            .with_ledger(ledger.clone())
+            .with_plugin_env(merged_shell_env(plugins)),
     )];
     for p in plugins {
         let owner_name = p.manifest().name;
@@ -66,6 +68,39 @@ pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
     let registry = Registry::new(tools);
     track_current_ledger(&ledger);
     (registry, manifests)
+}
+
+/// Fold each enabled plugin's `shell_env` manifest field into one
+/// contribution, in registry order. A plugin without the `shell.env` grant
+/// contributes nothing; per-entry validation (reserved names, non-absolute
+/// paths) happens inside [`gray_tools::PluginEnv::add_plugin`].
+fn merged_shell_env(plugins: &[Arc<dyn Plugin>]) -> gray_tools::PluginEnv {
+    let mut env = gray_tools::PluginEnv::default();
+    for p in plugins {
+        let manifest = p.manifest();
+        let Some(decl) = &manifest.shell_env else {
+            continue;
+        };
+        if !p
+            .capabilities()
+            .iter()
+            .any(|c| c == crate::capabilities::SHELL_ENV)
+        {
+            push_builder_warning(format!(
+                "plugin {:?} declares shell_env without the `{}` grant — ignoring it (gray plugin capabilities {} --all)",
+                manifest.name,
+                crate::capabilities::SHELL_ENV,
+                manifest.name
+            ));
+            continue;
+        }
+        env.add_plugin(
+            &manifest.name,
+            decl.vars.iter().map(|(k, v)| (k.clone(), v.clone())),
+            decl.path_prepend.iter().map(PathBuf::from),
+        );
+    }
+    env
 }
 
 static CURRENT_LEDGER: std::sync::Mutex<Option<std::sync::Weak<gray_tools::FileLedger>>> =
@@ -413,6 +448,16 @@ fn warn_missing_requires(plugins: &[Arc<dyn Plugin>]) {
     }
 }
 
+static AUTOSTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Let manifests marked `autostart` spawn at boot. Only long-lived
+/// interactive hosts (REPL, IDE) turn this on; one-shot runs, subagents and
+/// gateway child turns keep every plugin lazy so they never start background
+/// work they would kill on exit.
+pub fn set_autostart(allowed: bool) {
+    AUTOSTART.store(allowed, std::sync::atomic::Ordering::Relaxed);
+}
+
 async fn spawn_lock_plugin(
     name: &str,
     entry: &crate::lock::LockEntry,
@@ -440,6 +485,9 @@ async fn spawn_lock_plugin(
         pdir.and_then(|pd| {
             crate::lazy::cached_manifest(&pd.join(format!("{name}-manifest.json")), name)
         })
+        // autostart plugins own background work the session needs (cron
+        // ticks); they spawn eagerly like profile sidecars
+        .filter(|m| !(m.autostart && AUTOSTART.load(std::sync::atomic::Ordering::Relaxed)))
     } else {
         None
     };

@@ -18,6 +18,15 @@ fn outcome_text(o: &gray_core::agent::CommandOutcome) -> String {
         gray_core::agent::CommandOutcome::SubagentSettings(plugin) => {
             format!("subagent settings via {plugin}")
         }
+        gray_core::agent::CommandOutcome::Panel(spec) => {
+            format!("panel: {} ({} pages)", spec.title, spec.pages.len())
+        }
+        gray_core::agent::CommandOutcome::Picker(spec) => {
+            format!("picker: {} ({} items)", spec.title, spec.items.len())
+        }
+        gray_core::agent::CommandOutcome::Terminal { argv, .. } => {
+            format!("terminal: {}", argv.join(" "))
+        }
     }
 }
 

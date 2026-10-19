@@ -16,6 +16,8 @@ pub const WIDGET_OVERRIDE: &str = "widget.override";
 
 pub const PROVIDER_CREDENTIALS: &str = "provider.credentials";
 
+pub const SHELL_ENV: &str = "shell.env";
+
 pub struct CapabilitySpec {
     pub id: &'static str,
 
@@ -54,6 +56,11 @@ const SPECS: &[CapabilitySpec] = &[
         id: PROVIDER_CREDENTIALS,
         host_method: None,
         description: "contribute /connect providers and receive stored credentials for auth RPCs",
+    },
+    CapabilitySpec {
+        id: SHELL_ENV,
+        host_method: None,
+        description: "contribute environment variables and PATH prepends to the bash tool's shell",
     },
 ];
 

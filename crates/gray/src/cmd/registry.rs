@@ -12,7 +12,6 @@ fn args_hint(name: &str) -> Option<&'static str> {
         "new" => Some("[first message]"),
         "compact" => Some("[instructions]"),
         "context" => Some("[tokens|auto|status|reserve|keep]"),
-        "cron" => Some("[job id or name]"),
         "feedback" => Some("<what happened>"),
         "theme" => Some("[name|new <name>|reload]"),
         "hotkeys" => Some("[reload]"),

@@ -360,7 +360,7 @@ fn model_completes_cached_ids() {
     runtime.block_on(async {
         let models = crate::setup::fetch_live_provider_models(&base, None);
 
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 1);
     });
     response.join().unwrap();
     let rows = complete_command_args("models", "", cwd);
@@ -448,18 +448,6 @@ fn skill_singular_is_alias_for_skills_space() {
         parse_command("/skills:commit"),
         ReplCommand::Unknown(_)
     ));
-}
-
-#[test]
-fn cron_parses_bare_and_single_arg() {
-    assert!(matches!(
-        parse_command("/cron"),
-        ReplCommand::CronJobs(None)
-    ));
-    let ReplCommand::CronJobs(Some(id)) = parse_command("/cron abc123") else {
-        panic!("expected CronJobs(Some)");
-    };
-    assert_eq!(id, "abc123");
 }
 
 #[test]

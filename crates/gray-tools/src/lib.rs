@@ -41,6 +41,7 @@ pub use find::FindTool;
 pub use grep::GrepTool;
 pub use ledger::{FileLedger, LedgerEntry};
 pub use read::ReadTool;
+pub use shell::spawn::PluginEnv;
 pub use shell::tools::bash::BashTool;
 pub use write::WriteTool;
 

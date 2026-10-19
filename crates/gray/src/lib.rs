@@ -8,14 +8,9 @@ pub mod compact;
 pub mod composer;
 pub mod config;
 pub mod cron;
-pub mod cron_fire;
-pub mod cron_serve;
-pub mod cron_status;
-pub(crate) mod cron_tool;
 pub(crate) mod exe_watch;
 pub(crate) mod failed_turn;
 pub mod feedback;
-pub(crate) mod fusion;
 pub(crate) mod gateway_pid;
 pub mod host;
 pub mod ide;
@@ -31,11 +26,12 @@ pub mod profile;
 pub mod project_trust;
 pub mod prompt_templates;
 pub mod providers;
-pub mod qol;
+pub mod quality_of_life;
 pub mod repl;
 pub mod resume;
 mod rotation;
 pub mod search;
+pub mod session_mailbox;
 pub mod session_read;
 pub mod session_send;
 pub mod session_store;
@@ -54,6 +50,7 @@ pub mod tool_fmt;
 pub mod tui;
 pub mod turn_caps;
 pub mod update;
+pub(crate) mod util;
 
 use clap::{ArgGroup, Parser};
 use std::path::{Path, PathBuf};
@@ -193,6 +190,9 @@ fn cache_warm_policy(
         log::info!(target: "gray_agent",
             "cache warm disabled: provider is plugin-credentialed without request.warm_replay");
     }
+    if config.uses_plugin_credentials() && plugin_warm_replay {
+        log::info!(target: "gray_agent", "cache warm enabled: plugin declares request.warm_replay");
+    }
     if config.bare || !cacheable || std::env::var_os("GRAY_NO_CACHE_WARM").is_some() {
         return None;
     }
@@ -219,11 +219,21 @@ pub async fn build_agent(
     build_agent_with(config, cwd, session_id, true).await
 }
 
+pub fn set_active_model(config: &Config) {
+    gray_plugin::set_active_model(serde_json::json!({
+        "id": config.model,
+        "parts": config.model_parts,
+        "provider_id": config.provider_id,
+        "base_url": config.base_url,
+    }));
+}
+
 pub async fn build_model_agent(
     config: &Config,
     cwd: &Path,
     session_id: Option<&str>,
 ) -> anyhow::Result<gray_core::agent::Agent> {
+    set_active_model(config);
     build_agent_with(config, cwd, session_id, false).await
 }
 
@@ -233,6 +243,7 @@ async fn build_agent_with(
     session_id: Option<&str>,
     spawn_plugins: bool,
 ) -> anyhow::Result<gray_core::agent::Agent> {
+    set_active_model(config);
     let Some(model) = &config.model else {
         anyhow::bail!(
             "no model configured yet — set one with the models picker (TUI), --model/--api-key, or GRAY_MODEL/GRAY_API_KEY"
@@ -304,7 +315,7 @@ async fn build_agent_with(
         None
     };
     let config_bare = config.bare;
-    let agent = gray_plugin::builder::build_agent(gray_plugin::builder::BuilderOptions {
+    let mut agent = gray_plugin::builder::build_agent(gray_plugin::builder::BuilderOptions {
         model: wire_model.clone(),
         api_key: api_key.to_string(),
         base_url: config.base_url.clone(),
@@ -337,10 +348,6 @@ async fn build_agent_with(
                     prompt.push_str(&system_prompt::session_card(&session_cwd));
                 }
 
-                if let Some(framing) = crate::fusion::lead_framing() {
-                    prompt.push_str("\n\n");
-                    prompt.push_str(framing);
-                }
                 prompt
             })
         }),
@@ -359,6 +366,8 @@ async fn build_agent_with(
         prebooted_plugins,
     })
     .await?;
+    gray_plugin::refresh_dynamic_tools().await;
+    agent.refresh_tools();
     log::debug!(target: "gray_timing", "build_agent plugins+agent elapsed_ms={}", build_started.elapsed().as_millis());
     for w in gray_plugin::builder::take_builder_warnings() {
         profile::queue_profile_warning(w);
@@ -401,9 +410,6 @@ pub(crate) fn extra_surface_plugins(
         extra.push(Arc::new(crate::skills_tool::SkillsPlugin::default()));
         extra.push(Arc::new(crate::skills_tool::ProjectContextPlugin));
     }
-    if !config.bare && spawn_plugins {
-        extra.push(Arc::new(crate::fusion::FusionPlugin::default()));
-    }
     extra
 }
 
@@ -421,6 +427,13 @@ pub struct Cli {
         help = "Model id to use (env GRAY_MODEL; overrides the saved config)"
     )]
     pub model: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "K=V,...",
+        help = "Composite model slot selection, e.g. lead=m1,sidekick=m2"
+    )]
+    pub model_parts: Option<String>,
 
     #[arg(long, help = "Provider base URL (env GRAY_BASE_URL)")]
     pub base_url: Option<String>,

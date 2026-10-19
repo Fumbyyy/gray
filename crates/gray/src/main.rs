@@ -224,7 +224,7 @@ async fn run() -> anyhow::Result<()> {
                     return gray::auto_update::auto_cli(v);
                 }
                 if everything {
-                    return gray::qol::update::cli().await;
+                    return gray::quality_of_life::update::cli().await;
                 }
                 return gray::update::update_now().await;
             }
@@ -394,7 +394,7 @@ async fn run_resume_subcommand(
             }
             return Ok(());
         }
-        match gray::resume::run_resume_picker(all, None).await? {
+        match gray::resume::run_resume_picker(all, None, None).await? {
             Some(id) => id,
             None => return Ok(()),
         }

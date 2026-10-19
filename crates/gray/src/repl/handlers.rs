@@ -119,7 +119,6 @@ pub(crate) fn apply_skill_toggle(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Subsystem {
-    Cron,
     Gateway,
     Intro,
 }
@@ -127,7 +126,6 @@ pub(crate) enum Subsystem {
 impl Subsystem {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Subsystem::Cron => "cron",
             Subsystem::Gateway => "gateway",
             Subsystem::Intro => "intro",
         }
@@ -135,11 +133,6 @@ impl Subsystem {
 
     fn copy(self) -> (&'static str, &'static str, &'static str) {
         match self {
-            Subsystem::Cron => (
-                "cron on — scheduled jobs will fire",
-                "scheduled jobs won't fire",
-                "/cron still runs them",
-            ),
             Subsystem::Gateway => (
                 "gateway on",
                 "run/start will refuse to start",
@@ -155,7 +148,6 @@ impl Subsystem {
 
     fn field(self, saved: &mut crate::setup::SavedConfig) -> &mut Option<bool> {
         match self {
-            Subsystem::Cron => &mut saved.cron_auto,
             Subsystem::Gateway => &mut saved.gw_auto,
             Subsystem::Intro => &mut saved.intro,
         }
@@ -506,6 +498,8 @@ pub(crate) async fn reload_agent(
     if let Some(old) = old {
         rebuilt = rebuilt.with_messages(old.messages().to_vec());
     }
+    gray_plugin::refresh_dynamic_tools().await;
+    rebuilt.refresh_tools();
     *agent = Some(rebuilt);
     log::debug!(target: "gray_timing", "reload_agent elapsed_ms={}", started.elapsed().as_millis());
 }
@@ -526,6 +520,10 @@ pub(crate) async fn switch_agent_model(
         Ok(fresh) => {
             let messages = old.messages().to_vec();
             *agent = Some(fresh.with_tool_surface_of(old).with_messages(messages));
+            gray_plugin::refresh_dynamic_tools().await;
+            if let Some(a) = agent.as_mut() {
+                a.refresh_tools();
+            }
             log::debug!(target: "gray_timing", "switch_agent_model elapsed_ms={}", started.elapsed().as_millis());
         }
         Err(e) => {
@@ -576,11 +574,18 @@ pub(crate) fn apply_model_selection_at(
     let (_, list_key, _) = crate::setup::picker_scope(config);
     let cached = crate::setup::saved_models_for(&list_key, &config.base_url);
     let mut checked = crate::setup::validate_direct_model_id(raw, &cached);
+    let cached_variant = if checked.is_err() {
+        crate::setup::decompose_model_variant(raw, &cached)
+    } else {
+        None
+    };
     let mut live_rows: Vec<(String, String)> = Vec::new();
-    if checked.is_err() {
+    if checked.is_err() && cached_variant.is_none() {
+        let started = std::time::Instant::now();
         let (_, known) = crate::setup::provider_models_for_config(config);
         checked = crate::setup::validate_direct_model_id(raw, &known);
         live_rows = known;
+        log::debug!(target: "gray_timing", "model list live fetch elapsed_ms={}", started.elapsed().as_millis());
     }
 
     let mut ids = cached.clone();
@@ -592,10 +597,12 @@ pub(crate) fn apply_model_selection_at(
     let (m, variant_tier, id_fast) = match checked {
         Ok(canonical) => crate::setup::decompose_model_variant(&canonical, &ids)
             .unwrap_or((canonical, None, false)),
-        Err(msg) => match crate::setup::decompose_model_variant(raw, &ids) {
-            Some(v) => v,
-            None => return Err(msg),
-        },
+        Err(msg) => {
+            match cached_variant.or_else(|| crate::setup::decompose_model_variant(raw, &ids)) {
+                Some(v) => v,
+                None => return Err(msg),
+            }
+        }
     };
 
     let fast = if std::env::var_os("GRAY_FAST").is_some() {
@@ -687,7 +694,7 @@ async fn finish_model_pick(
             t.set_hide_thinking(*hide_thinking);
         }
         if let Some((old, new)) = clamped {
-            super::cron::push_notice(
+            super::notice::push_notice(
                 &mut t,
                 "Thinking effort clamped",
                 &format!("from {old} to {new} (not supported by this model)"),
@@ -769,7 +776,7 @@ pub(crate) async fn handle_model_panes(
         Err(e) => {
             if let Some(shared) = tui {
                 let mut t = shared.lock().expect("tui lock");
-                super::cron::push_notice(&mut t, "Model error", &e.to_string(), true);
+                super::notice::push_notice(&mut t, "Model error", &e.to_string(), true);
                 t.ensure_gap();
             } else {
                 say(None, &format!("model error: {e}"));
@@ -817,7 +824,7 @@ pub(crate) async fn handle_model(
             }
             t.push_action("Model set to", Some(&m));
             if let Some((old, new)) = &applied.clamped {
-                super::cron::push_notice(
+                super::notice::push_notice(
                     &mut t,
                     "Thinking effort clamped",
                     &format!("from {old} to {new} (not supported by this model)"),
@@ -894,7 +901,7 @@ pub(crate) async fn handle_model(
         Err(e) => {
             if let Some(shared) = tui {
                 let mut t = shared.lock().expect("tui lock");
-                super::cron::push_notice(&mut t, "Model error", &e.to_string(), true);
+                super::notice::push_notice(&mut t, "Model error", &e.to_string(), true);
                 t.ensure_gap();
             } else {
                 say(None, &format!("model error: {e}"));

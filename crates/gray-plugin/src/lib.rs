@@ -21,14 +21,15 @@ pub mod sidecar;
 
 pub use lazy::{LazySidecarPlugin, cached_manifest, lazy_enabled};
 pub use live::LiveRegistry;
+pub use sidecar::{refresh_dynamic_tools, set_active_model};
 
 pub use sidecar::{
     ASK_HANDLER_TTL, ASK_TTL, HOST_ASK, HOST_RUN, HOST_SAY, HOST_TTL, HostHandler, SidecarPlugin,
 };
 
 pub use capabilities::{
-    CapabilitySpec, HOST_ASK as CAP_HOST_ASK, HOST_SAY as CAP_HOST_SAY, HOST_TURN, TOOL_OVERRIDE,
-    WIDGET_OVERRIDE,
+    CapabilitySpec, HOST_ASK as CAP_HOST_ASK, HOST_SAY as CAP_HOST_SAY, HOST_TURN, SHELL_ENV,
+    TOOL_OVERRIDE, WIDGET_OVERRIDE,
 };
 
 pub const DYNAMIC_PROTOCOL: &str = "1.3";
@@ -60,6 +61,18 @@ pub struct Manifest {
     #[serde(default)]
     pub hooks: Vec<String>,
 
+    /// First-argv verbs each declared command may run mid-turn; `""` is
+    /// the bare command and `"*"` allows any argv. Keys that are not
+    /// among `commands` are dropped at parse time.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub turn_local: HashMap<String, Vec<String>>,
+
+    /// Spawn the plugin at session start instead of on first use — for
+    /// plugins that run background work the session depends on (e.g. the
+    /// gateway's cron ticker).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autostart: bool,
+
     #[serde(default)]
     pub protocol: Option<String>,
 
@@ -69,13 +82,54 @@ pub struct Manifest {
     #[serde(default)]
     pub capabilities: Vec<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env: Option<ShellEnvDecl>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires_plugins: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderDecl>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composite_rows: Vec<CompositeRowDecl>,
     #[serde(skip)]
     pub provider_errors: Vec<ProviderValidationError>,
+}
+
+/// A plugin's `shell_env` manifest field: static environment contributions
+/// for the bash tool's shell, gated by the `shell.env` capability.
+/// `path_prepend` accepts absolute directories only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShellEnvDecl {
+    #[serde(default)]
+    pub vars: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub path_prepend: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompositeRowDecl {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub slots: Vec<CompositeSlotDecl>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompositeSlotDecl {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub source: CompositeSource,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompositeSource {
+    #[default]
+    Own,
+    All,
 }
 
 pub fn parse_tool_entry(v: &Value) -> Option<ToolDef> {
@@ -168,6 +222,27 @@ impl Manifest {
                 });
             }
         }
+        let commands: Vec<String> = str_list("commands");
+        let turn_local = v
+            .get("turn_local")
+            .and_then(|t| t.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter(|(k, _)| commands.iter().any(|c| c == *k))
+                    .map(|(k, val)| {
+                        let verbs = val
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|e| e.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (k.clone(), verbs)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             name: v
                 .get("name")
@@ -180,13 +255,27 @@ impl Manifest {
                 .unwrap_or_default()
                 .into(),
             tools: manifest_tools(v),
-            commands: str_list("commands"),
+            commands,
+            turn_local,
             hooks: str_list("hooks"),
+            autostart: v
+                .get("autostart")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
             protocol: v.get("protocol").and_then(|s| s.as_str()).map(|s| s.into()),
             subcommands: str_list("subcommands"),
             capabilities: crate::capabilities::parse_declared(&str_list("capabilities")),
+            shell_env: v.get("shell_env").and_then(|raw| {
+                serde_json::from_value(raw.clone())
+                    .map_err(|e| log::warn!("ignoring invalid shell_env in plugin manifest: {e}"))
+                    .ok()
+            }),
             requires_plugins: str_list("requires_plugins"),
             providers,
+            composite_rows: serde_json::from_value(
+                v.get("composite_rows").cloned().unwrap_or_default(),
+            )
+            .unwrap_or_default(),
             provider_errors,
         }
     }
@@ -290,10 +379,11 @@ impl PluginHooks for PluginHookAdapter {
     fn commands(&self) -> Vec<PluginCommand> {
         let m = self.plugin.manifest();
         m.commands
-            .into_iter()
-            .chain(m.subcommands)
+            .iter()
+            .chain(m.subcommands.iter())
             .map(|name| PluginCommand {
-                name,
+                turn_local_verbs: m.turn_local.get(name).cloned().unwrap_or_default(),
+                name: name.clone(),
                 description: String::new(),
             })
             .collect()

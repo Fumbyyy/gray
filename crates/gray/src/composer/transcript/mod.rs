@@ -103,8 +103,12 @@ pub(crate) fn layout_history(
     for entry in entries {
         match entry {
             TranscriptEntry::Welcome => out.extend(super::build_welcome_lines(w)),
-            TranscriptEntry::UserPrompt(text, _) => {
-                place(&mut out, &mut owed, format_user_prompt_lines(text, w));
+            TranscriptEntry::UserPrompt(text, attached) => {
+                place(
+                    &mut out,
+                    &mut owed,
+                    format_user_prompt_lines(text, attached, w),
+                );
             }
             TranscriptEntry::ToolBox { header, body } => {
                 place(
@@ -520,7 +524,7 @@ impl Tui {
     ) {
         self.atomic(|t| {
             t.ensure_gap();
-            let lines = format_user_prompt_lines(text, t.width().max(10));
+            let lines = format_user_prompt_lines(text, attached, t.width().max(10));
             t.history_entries.push(super::TranscriptEntry::UserPrompt(
                 text.to_string(),
                 attached.to_vec(),
@@ -533,6 +537,47 @@ impl Tui {
         cap_history_entries(&mut self.history_entries);
         let _ = std::io::stdout().flush();
     }
+}
+
+/// Marker that opens a synthetic user message carrying a background-task
+/// notification to the model. Stored in the session like any user message,
+/// but replayed as a compact dim line instead of a prompt block.
+pub(crate) const BG_NOTICE_MARKER: &str = "[Background task notification]";
+
+/// Marker that opens a synthetic user message carrying a cron delivery.
+pub(crate) const CRON_DELIVERY_MARKER: &str = "[Cron delivery: ";
+
+fn is_notice_marker(line: &str) -> bool {
+    line.starts_with(BG_NOTICE_MARKER) || line.starts_with(CRON_DELIVERY_MARKER)
+}
+
+/// Split a stored user prompt into the part worth replaying as a prompt
+/// block and one-line summaries of any injected-notification segments.
+/// `↳ from` session sends stay visible — they carry real user text.
+pub(crate) fn split_synthetic_prompt(text: &str) -> (String, Vec<String>) {
+    let mut visible: Vec<&str> = Vec::new();
+    let mut notices: Vec<String> = Vec::new();
+    let mut in_notice = false;
+    let mut captured = false;
+    for line in text.lines() {
+        if is_notice_marker(line) {
+            in_notice = true;
+            captured = false;
+            continue;
+        }
+        if line.starts_with(crate::session_send::SEND_FROM_PREFIX) {
+            in_notice = false;
+        }
+        if in_notice {
+            if !captured && !line.trim().is_empty() {
+                notices.push(line.trim().to_string());
+                captured = true;
+            }
+        } else {
+            visible.push(line);
+        }
+    }
+    (visible.join("\n").trim_end().to_string(), notices)
 }
 
 #[path = "mod_tests.rs"]

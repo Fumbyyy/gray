@@ -14,7 +14,7 @@ pub struct BackgroundSnapshot {
     pub home_notice: Option<String>,
     pub plugin_stats: Option<String>,
     pub home_update: Option<String>,
-    pub home_qol: Option<String>,
+    pub home_quality_of_life: Option<String>,
     pub home_session: Option<String>,
     pub attachments: Vec<std::path::PathBuf>,
 }
@@ -40,7 +40,7 @@ impl BackgroundSnapshot {
             home_notice: None,
             plugin_stats: None,
             home_update: None,
-            home_qol: None,
+            home_quality_of_life: None,
             home_session: None,
             attachments: Vec::new(),
         }
@@ -292,7 +292,7 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
             model_tail: None,
             above: bg.home_update.as_deref(),
             session: bg.home_session.as_deref(),
-            qol: bg.home_qol.as_deref(),
+            quality_of_life: bg.home_quality_of_life.as_deref(),
         };
         let chips = crate::composer::draw::attachment_cells(&bg.attachments, &bg.prompt_text);
         let ibox =

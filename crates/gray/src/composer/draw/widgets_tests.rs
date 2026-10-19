@@ -54,7 +54,7 @@ fn home_box_is_the_flat_band_with_hints_stats_and_notice_under_it() {
         model_tail: Some(" max"),
         above: None,
         session: None,
-        qol: None,
+        quality_of_life: None,
     };
     let w = 100;
     let ibox = build_input_box("hi", 2, w, None, Some(home), &[]);

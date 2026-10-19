@@ -25,7 +25,7 @@ fn fake_models() -> Vec<(String, String)> {
 fn picker_rec(models: &[(String, String)]) -> store::PendingDoc {
     store::PendingDoc {
         kind: "model_picker".to_string(),
-        created_at: crate::cron::now_secs(),
+        created_at: crate::util::now_secs(),
         user: None,
         draft: store::ModelDraft {
             model: Some("m0".to_string()),
@@ -244,7 +244,7 @@ async fn interact_values_and_fast_revise_the_doc() {
         v["components"][0]["content"],
         "**Model** — `m1` · effort `low` · fast `off`"
     );
-    let saved = store::get(home.path(), &token, crate::cron::now_secs()).unwrap();
+    let saved = store::get(home.path(), &token, crate::util::now_secs()).unwrap();
     assert_eq!(saved.draft.model.as_deref(), Some("m1"));
     assert_eq!(saved.draft.effort.as_deref(), Some("low"));
 
@@ -266,7 +266,7 @@ async fn interact_values_and_fast_revise_the_doc() {
             .unwrap()
             .contains("fast `on`")
     );
-    let saved = store::get(home.path(), &token, crate::cron::now_secs()).unwrap();
+    let saved = store::get(home.path(), &token, crate::util::now_secs()).unwrap();
     assert!(saved.draft.fast);
 }
 
@@ -294,7 +294,7 @@ async fn interact_apply_persists_and_closes() {
     assert!(close);
     assert!(text.contains("Model set to m1"), "text: {text}");
 
-    assert!(store::get(home.path(), &token, crate::cron::now_secs()).is_err());
+    assert!(store::get(home.path(), &token, crate::util::now_secs()).is_err());
     assert_eq!(config.model.as_deref(), Some("m1"));
     assert_eq!(config.thinking_effort.as_deref(), Some("low"));
     assert_eq!(config.fast_mode, Some(true));
@@ -320,7 +320,7 @@ async fn interact_cancel_closes() {
     };
     assert_eq!(text, "Cancelled.");
     assert!(close);
-    assert!(store::get(home.path(), &token, crate::cron::now_secs()).is_err());
+    assert!(store::get(home.path(), &token, crate::util::now_secs()).is_err());
 }
 
 #[tokio::test]
@@ -332,7 +332,7 @@ async fn interact_expired_and_bad_actions() {
     assert_eq!(err.0, "expired");
 
     let mut rec = picker_rec(&fake_models());
-    rec.created_at = crate::cron::now_secs() - store::PENDING_TTL_SECS - 1;
+    rec.created_at = crate::util::now_secs() - store::PENDING_TTL_SECS - 1;
     let token = store::put(home.path(), &rec).unwrap();
     let err = interact(&mut config, home.path(), &token, None).unwrap_err();
     assert_eq!(err.0, "expired");
@@ -425,7 +425,7 @@ async fn run_model_direct_set() {
 }
 
 #[tokio::test]
-async fn run_help_and_cron_and_skills_text() {
+async fn run_help_and_skills_text() {
     let home = tempfile::tempdir().unwrap();
     let mut config = test_config();
     let res = run_command(&mut config, home.path(), "help", &[])
@@ -436,14 +436,6 @@ async fn run_help_and_cron_and_skills_text() {
     };
     assert!(text.contains("/model"));
     assert!(text.contains("/help"));
-
-    let res = run_command(&mut config, home.path(), "cron", &[])
-        .await
-        .unwrap();
-    let CommandResult::Text { text, .. } = res else {
-        panic!("expected text");
-    };
-    assert!(text.contains("no cron jobs"));
 
     let skills_dir = home.path().join("skills").join("demo-skill");
     std::fs::create_dir_all(&skills_dir).unwrap();
@@ -556,7 +548,7 @@ async fn interact_slot_values_update_draft_parts() {
     assert_eq!(comps[2]["children"][0]["options"][1]["default"], true);
     assert_eq!(comps[3]["children"][0]["options"][1]["value"], "b");
     assert_eq!(comps[3]["children"][0]["options"][1]["default"], true);
-    let saved = store::get(home.path(), &token, crate::cron::now_secs()).unwrap();
+    let saved = store::get(home.path(), &token, crate::util::now_secs()).unwrap();
     assert_eq!(saved.draft.parts["lead"], "swe");
     assert_eq!(saved.draft.parts["sidekick"], "b");
 
@@ -567,7 +559,7 @@ async fn interact_slot_values_update_draft_parts() {
         Some(r#"{"values":{"model":["m0"]}}"#),
     )
     .unwrap();
-    let saved = store::get(home.path(), &token, crate::cron::now_secs()).unwrap();
+    let saved = store::get(home.path(), &token, crate::util::now_secs()).unwrap();
     assert!(saved.draft.parts.is_empty());
     interact(
         &mut config,
@@ -576,7 +568,7 @@ async fn interact_slot_values_update_draft_parts() {
         Some(r#"{"values":{"model":["fusion-x"]}}"#),
     )
     .unwrap();
-    let saved = store::get(home.path(), &token, crate::cron::now_secs()).unwrap();
+    let saved = store::get(home.path(), &token, crate::util::now_secs()).unwrap();
     assert_eq!(saved.draft.parts["lead"], "opus");
     assert_eq!(saved.draft.parts["sidekick"], "a");
 
@@ -666,7 +658,7 @@ async fn interact_apply_unserved_combo_bounces() {
     assert!(!close);
     assert!(text.contains("no fusion-x variant serves"), "text: {text}");
 
-    assert!(store::get(home.path(), &token, crate::cron::now_secs()).is_ok());
+    assert!(store::get(home.path(), &token, crate::util::now_secs()).is_ok());
     assert_ne!(config.model.as_deref(), Some("fusion-x"));
 }
 

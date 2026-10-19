@@ -87,18 +87,6 @@ fn spawn_text(argv: &[String], args: &[&str]) -> Option<String> {
     )
 }
 
-pub(crate) fn run_subagents_view(args: &[String]) -> Option<String> {
-    if args == ["settings"] {
-        return Some(
-            "subagents settings: the modal opens when the turn finishes — rerun `/subagents settings`, or set directly with `settings --model/--effort/--context/--max-running`"
-                .into(),
-        );
-    }
-    let argv = plugin_argv("subagents")?;
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    spawn_text(&argv, &refs)
-}
-
 fn fetch_rows(argv: &[String], all: bool) -> Vec<Row> {
     let mut args = vec!["entries"];
     if all {
@@ -449,9 +437,25 @@ fn replay_entry(v: &mut Viewer, entry: &SessionEntry, cwd: &Path, w: usize) {
                     _ => {}
                 }
             }
-            if !user_text.is_empty() || !attached.is_empty() {
+            let (visible, notices) =
+                crate::composer::transcript::split_synthetic_prompt(&user_text);
+            if !visible.is_empty() || !attached.is_empty() {
                 gap_mark(v);
-                push_block(v, TranscriptEntry::UserPrompt(user_text, attached));
+                push_block(v, TranscriptEntry::UserPrompt(visible, attached));
+                gap_mark(v);
+            }
+            for notice in notices {
+                gap_mark(v);
+                push_block(
+                    v,
+                    TranscriptEntry::StyledLines {
+                        lines: vec![Line::from(Span::styled(
+                            format!("\u{2b22} {notice}"),
+                            Style::default().add_modifier(Modifier::DIM),
+                        ))],
+                        hyperlinks: Vec::new(),
+                    },
+                );
                 gap_mark(v);
             }
         }

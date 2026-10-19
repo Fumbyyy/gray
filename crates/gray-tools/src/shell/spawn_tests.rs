@@ -12,8 +12,8 @@ fn setsid_failure_is_an_error() {
 #[cfg(unix)]
 #[tokio::test]
 async fn spawn_records_real_process_group() {
-    let spawned =
-        spawn("true", &PathBuf::from("/tmp"), None, None, None).expect("sh -c true must spawn");
+    let spawned = spawn("true", &PathBuf::from("/tmp"), None, None, None, None)
+        .expect("sh -c true must spawn");
     assert_eq!(spawned.pgid, spawned.pid as i32);
 }
 
@@ -58,6 +58,7 @@ async fn exec_prefix_runs_the_command_on_the_far_shell() {
         None,
         Some(vec!["sh".into(), "-s".into()]),
         None,
+        None,
     )
     .expect("prefixed spawn must succeed");
     let out = spawned.child.wait_with_output().await.expect("child");
@@ -78,6 +79,7 @@ async fn exec_prefix_carries_gray_env_across_the_boundary() {
         Some("sess-1"),
         Some(&report),
         Some(vec!["sh".into(), "-s".into()]),
+        None,
         None,
     )
     .expect("prefixed spawn must succeed");
@@ -101,10 +103,147 @@ async fn a_heredoc_survives_the_prefix_boundary_intact() {
         None,
         Some(vec!["sh".into(), "-s".into()]),
         None,
+        None,
     )
     .expect("prefixed spawn must succeed");
     let out = spawned.child.wait_with_output().await.expect("child");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains('1'), "heredoc via prefix: {stdout:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn plugin_env(vars: &[(&str, &str)], path_prepend: &[&str]) -> PluginEnv {
+    let mut env = PluginEnv::default();
+    env.add_plugin(
+        "test-plugin",
+        vars.iter().map(|(k, v)| (k.to_string(), v.to_string())),
+        path_prepend.iter().map(std::path::PathBuf::from),
+    );
+    env
+}
+
+#[test]
+fn plugin_env_skips_relative_path_prepend_entries() {
+    let env = plugin_env(&[], &["relative/dir", "also/relative"]);
+    assert!(env.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn plugin_vars_reach_the_spawned_shell() {
+    let env = plugin_env(&[("GRAY_PLUGIN_THING", "from-plugin")], &[]);
+    let spawned = spawn(
+        "echo thing=$GRAY_PLUGIN_THING",
+        &PathBuf::from("/tmp"),
+        None,
+        None,
+        None,
+        Some(&env),
+    )
+    .expect("spawn");
+    let out = spawned.child.wait_with_output().await.expect("child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("thing=from-plugin"), "stdout: {stdout:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn plugin_vars_are_exported_into_a_prefixed_script() {
+    let env = plugin_env(&[("GRAY_PLUGIN_THING", "across")], &[]);
+    let spawned = spawn_with_prefix(
+        "echo thing=$GRAY_PLUGIN_THING",
+        &PathBuf::from("/tmp"),
+        None,
+        None,
+        Some(vec!["sh".into(), "-s".into()]),
+        None,
+        Some(&env),
+    )
+    .expect("prefixed spawn");
+    let out = spawned.child.wait_with_output().await.expect("child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("thing=across"), "stdout: {stdout:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn plugin_path_prepend_leads_the_inherited_path() {
+    let dir = std::env::temp_dir().join(format!("gray-plugin-path-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let shim = dir.join("gray-plugin-shim");
+    std::fs::write(&shim, "#!/bin/sh\necho shim-won\n").expect("shim");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let env = plugin_env(&[], &[dir.to_str().expect("utf8 path")]);
+    let spawned = spawn(
+        r#"gray-plugin-shim; echo "first=${PATH%%:*}""#,
+        &PathBuf::from("/tmp"),
+        None,
+        None,
+        None,
+        Some(&env),
+    )
+    .expect("spawn");
+    let out = spawned.child.wait_with_output().await.expect("child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("shim-won"), "stdout: {stdout:?}");
+    assert!(
+        stdout.contains(&format!("first={}", dir.display())),
+        "plugin dir must lead PATH: {stdout:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn plugin_env_cannot_override_reserved_vars() {
+    let env = plugin_env(
+        &[
+            ("GRAY_SESSION_ID", "forged"),
+            ("TERM", "xterm"),
+            ("PATH", "/nowhere"),
+        ],
+        &[],
+    );
+    let spawned = spawn(
+        "echo s=$GRAY_SESSION_ID t=$TERM; echo $PATH",
+        &PathBuf::from("/tmp"),
+        Some("real-session"),
+        None,
+        None,
+        Some(&env),
+    )
+    .expect("spawn");
+    let out = spawned.child.wait_with_output().await.expect("child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("s=real-session"), "stdout: {stdout:?}");
+    assert!(stdout.contains("t=dumb"), "stdout: {stdout:?}");
+    assert!(!stdout.contains("forged"), "stdout: {stdout:?}");
+    assert!(!stdout.contains("xterm"), "stdout: {stdout:?}");
+    assert!(!stdout.contains("/nowhere"), "stdout: {stdout:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_later_plugin_var_overrides_an_earlier_one() {
+    let mut env = PluginEnv::default();
+    env.add_plugin("first", [("GRAY_ORDER".to_string(), "one".to_string())], []);
+    env.add_plugin(
+        "second",
+        [("GRAY_ORDER".to_string(), "two".to_string())],
+        [],
+    );
+    let spawned = spawn(
+        "echo order=$GRAY_ORDER",
+        &PathBuf::from("/tmp"),
+        None,
+        None,
+        None,
+        Some(&env),
+    )
+    .expect("spawn");
+    let out = spawned.child.wait_with_output().await.expect("child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("order=two"), "stdout: {stdout:?}");
 }

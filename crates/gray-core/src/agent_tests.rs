@@ -2367,6 +2367,7 @@ fn tool_output_media_goes_native_or_as_its_fallback() {
         content: "clip.mp4 (video)".into(),
         is_error: false,
         images: Vec::new(),
+        usage: None,
         media: vec![crate::agent::AttachedMedia {
             media_type: "video/mp4".into(),
             data: "VID".into(),
@@ -3442,4 +3443,45 @@ async fn bench_nudges_thrash_mark_adds_converge_hint() {
     let note2 = reqs[1].1.last().expect("note").text_content();
     assert!(!note1.contains("many requests used"), "early: {note1}");
     assert!(note2.contains("many requests used"), "mark 2: {note2}");
+}
+
+#[tokio::test]
+async fn malformed_calls_block_names_the_block_not_the_tool() {
+    let provider = FakeProvider::new(vec![
+        vec![
+            StreamEvent::tool_call_delta(
+                0,
+                Some("c-block".into()),
+                Some(TOOL_NAME.into()),
+                r#"[{"name": "x", "arguments": {"q": 1}]"#,
+            ),
+            StreamEvent::message_complete(Some(StopReason::ToolUse), None),
+        ],
+        end_script(),
+    ]);
+    let executor = FakeExecutor::new(ToolOutput::ok("should-not-reach"));
+    let call_log = executor.calls.clone();
+    let mut agent = Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
+    let events = agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .unwrap();
+    assert!(call_log.lock().expect("calls lock poisoned").is_empty());
+    let output = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolResult {
+                id,
+                output,
+                is_error: true,
+            } if id == "c-block" => Some(output.clone()),
+            _ => None,
+        })
+        .expect("expected an error result for the block");
+    assert!(
+        output.contains("tool-call block is not valid JSON"),
+        "got {output}"
+    );
+    assert!(output.contains("line 1 column"), "got {output}");
+    assert!(!output.contains(TOOL_NAME), "got {output}");
 }

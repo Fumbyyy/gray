@@ -773,7 +773,7 @@ fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
 fn apply_mcp(
     d: &ToolDef,
     entries: &[(String, serde_json::Value)],
-    state: &mut super::QolState,
+    state: &mut super::State,
     run: &str,
 ) -> anyhow::Result<String> {
     let path =
@@ -808,7 +808,7 @@ fn apply_mcp(
 fn apply_skills_logged(
     d: &ToolDef,
     src_dir: &Path,
-    state: &mut super::QolState,
+    state: &mut super::State,
     run: &str,
 ) -> anyhow::Result<String> {
     let dest_dir = crate::setup::gray_home()?.join("skills");
@@ -868,7 +868,7 @@ async fn apply_plugin(name: &str) -> anyhow::Result<String> {
 fn apply_creds(
     d: &ToolDef,
     entries: &[CredItem],
-    state: &mut super::QolState,
+    state: &mut super::State,
     run: &str,
 ) -> anyhow::Result<String> {
     apply_creds_at(&cred_store()?, d, entries, state, run)
@@ -878,7 +878,7 @@ fn apply_creds_at(
     store: &CredentialStore,
     d: &ToolDef,
     entries: &[CredItem],
-    state: &mut super::QolState,
+    state: &mut super::State,
     run: &str,
 ) -> anyhow::Result<String> {
     let _lock = store.lock()?;
@@ -1100,7 +1100,10 @@ pub(crate) async fn handle(tui: &TuiOpt, arg: Option<String>) {
     }
 
     if !super::enabled() {
-        say(tui, "qol disabled (\"qol\": false in config.json)");
+        say(
+            tui,
+            "quality-of-life disabled (\"quality_of_life\": false in config.json)",
+        );
         return;
     }
     let detected = super::detect::scan();
@@ -1236,7 +1239,7 @@ pub(crate) async fn handle(tui: &TuiOpt, arg: Option<String>) {
         }
     }
     let _ = super::save_state(&state);
-    out.push_str("log: $GRAY_HOME/qol/state.json · /setup undo reverses");
+    out.push_str("log: $GRAY_HOME/quality-of-life/state.json · /setup undo reverses");
     say(tui, &out);
 }
 

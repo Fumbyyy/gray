@@ -68,25 +68,45 @@ fn consumed_paste_and_keys_preserve_order_under_contention() {
     assert_eq!(*state.lock().unwrap(), "apasted wordsb");
 }
 
+struct TurnLocalHook;
+
+#[async_trait::async_trait]
+impl gray_core::agent::PluginHooks for TurnLocalHook {
+    fn commands(&self) -> Vec<gray_core::agent::PluginCommand> {
+        vec![
+            gray_core::agent::PluginCommand {
+                name: "/subagents".to_string(),
+                description: "agents panel".to_string(),
+                turn_local_verbs: ["", "status", "view", "list", "open"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            },
+            gray_core::agent::PluginCommand {
+                name: "/board".to_string(),
+                description: "dashboard".to_string(),
+                turn_local_verbs: vec!["*".to_string()],
+            },
+            gray_core::agent::PluginCommand {
+                name: "/queue".to_string(),
+                description: "never turn-local".to_string(),
+                turn_local_verbs: Vec::new(),
+            },
+        ]
+    }
+}
+
+fn hooks() -> Vec<std::sync::Arc<dyn gray_core::agent::PluginHooks>> {
+    vec![std::sync::Arc::new(TurnLocalHook)]
+}
+
 #[test]
-fn turn_local_commands_are_read_only() {
+fn builtin_commands_stay_turn_local() {
     for cmd in [
         "/usage",
         "/cost",
         "/jobs",
-        "/cron",
-        "/cron nightly",
         "/help",
-        "/subagents",
-        "/subagents status",
-        "/subagents status --all",
-        "/subagents view e2e",
-        "/subagents open e2e",
-        "/subagents list",
-        "/subagents menu",
-        "/subagents entries",
-        "/subagents manifest",
-        "/subagents e2e",
         "/theme",
         "/theme banish",
         "/plugins",
@@ -98,12 +118,34 @@ fn turn_local_commands_are_read_only() {
         "/gateway off",
         "/hehe",
     ] {
-        assert!(is_turn_local_command(cmd), "{cmd}");
+        assert!(is_turn_local_command(cmd, &hooks()), "{cmd}");
+        assert!(is_turn_local_command(cmd, &[]), "{cmd} needs no hooks");
     }
 }
 
 #[test]
-fn mutating_or_agent_commands_still_queue() {
+fn plugin_declared_verbs_are_turn_local() {
+    for cmd in [
+        "/subagents",
+        "/subagents status",
+        "/subagents status --all",
+        "/subagents view e2e",
+        "/subagents open e2e",
+        "/subagents list",
+    ] {
+        assert!(is_turn_local_command(cmd, &hooks()), "{cmd}");
+    }
+}
+
+#[test]
+fn plugin_star_verb_allows_any_argv() {
+    for cmd in ["/board", "/board anything", "/board sub verb"] {
+        assert!(is_turn_local_command(cmd, &hooks()), "{cmd}");
+    }
+}
+
+#[test]
+fn plugin_undeclared_verbs_and_commands_queue() {
     for cmd in [
         "/subagents run do work",
         "/subagents steer e2e hello",
@@ -113,14 +155,25 @@ fn mutating_or_agent_commands_still_queue() {
         "/subagents settings",
         "/subagents setup",
         "/subagents widget --demo",
-        "/model",
-        "/compact",
-        "/cron on",
-        "/cron off",
-        "/cron enable",
-        "/cron disable",
-        "normal follow-up",
+        "/subagents menu",
+        "/subagents e2e",
+        "/queue",
+        "/queue status",
+        "/unknown",
+        "/unknown status",
+        "/subagents-quiet status",
     ] {
-        assert!(!is_turn_local_command(cmd), "{cmd}");
+        assert!(!is_turn_local_command(cmd, &hooks()), "{cmd}");
+    }
+    assert!(
+        !is_turn_local_command("/subagents status", &[]),
+        "no hooks, no turn-local plugin commands"
+    );
+}
+
+#[test]
+fn mutating_or_agent_commands_still_queue() {
+    for cmd in ["/model", "/compact", "normal follow-up"] {
+        assert!(!is_turn_local_command(cmd, &hooks()), "{cmd}");
     }
 }

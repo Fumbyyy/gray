@@ -411,10 +411,15 @@ impl Tui {
                             .iter()
                             .any(|b| matches!(b, gray_core::ContentBlock::Text { .. }));
                     if !user_text.is_empty() || !attached.is_empty() {
-                        self.push_user_prompt(&user_text, &attached, true);
-
-                        if typed {
-                            self.history.push(user_text.clone());
+                        let (visible, notices) = super::split_synthetic_prompt(&user_text);
+                        if !visible.is_empty() || !attached.is_empty() {
+                            self.push_user_prompt(&visible, &attached, true);
+                        }
+                        for notice in notices {
+                            self.push_dim(format!("\u{2b22} {notice}"));
+                        }
+                        if typed && !visible.is_empty() {
+                            self.history.push(visible);
                             if self.history.len() > 100 {
                                 self.history.remove(0);
                             }
@@ -510,13 +515,23 @@ fn replay_tool_result(
             display.preview(&name),
         ),
     };
-    let lines = crate::tool_fmt::format_tool_result_lines_with_context(
+    let mut lines = crate::tool_fmt::format_tool_result_lines_with_context(
         &name,
         args.as_ref(),
         content,
         is_error,
         Some(cwd),
     );
+    if !is_error
+        && let Some(rows) = crate::composer::transcript::rows::viewed_image_lines(
+            &name,
+            args.as_ref(),
+            cwd,
+            tui.width(),
+        )
+    {
+        lines.extend(rows);
+    }
     tui.push_tool_box_lines(header, lines);
 }
 

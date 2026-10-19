@@ -322,7 +322,7 @@ pub(crate) struct HomeRows<'a> {
     pub(crate) stats: Option<&'a str>,
     pub(crate) model: Option<&'a str>,
     pub(crate) model_tail: Option<&'a str>,
-    pub(crate) qol: Option<&'a str>,
+    pub(crate) quality_of_life: Option<&'a str>,
 
     pub(crate) above: Option<&'a str>,
 
@@ -418,12 +418,12 @@ fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
             ]));
         }
     }
-    if let Some(qol) = home.qol {
+    if let Some(quality_of_life) = home.quality_of_life {
         if rows.is_empty() {
             rows.push(Line::default());
         }
         rows.push(Line::from(Span::styled(
-            qol.to_string(),
+            quality_of_life.to_string(),
             Style::default().fg(t.text_muted),
         )));
     }

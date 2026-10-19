@@ -81,6 +81,9 @@ pub struct ToolOutput {
 
     #[serde(default, alias = "videos")]
     pub media: Vec<AttachedMedia>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Box<Usage>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +108,7 @@ impl ToolOutput {
             is_error: false,
             images: Vec::new(),
             media: Vec::new(),
+            usage: None,
         }
     }
     pub fn error(content: impl Into<String>) -> Self {
@@ -113,6 +117,7 @@ impl ToolOutput {
             is_error: true,
             images: Vec::new(),
             media: Vec::new(),
+            usage: None,
         }
     }
 
@@ -122,6 +127,7 @@ impl ToolOutput {
             is_error: false,
             images: vec![AttachedImage { media_type, data }],
             media: Vec::new(),
+            usage: None,
         }
     }
 
@@ -355,6 +361,60 @@ impl InputSubmit {
 pub struct PluginCommand {
     pub name: String,
     pub description: String,
+    /// First-argv verbs the plugin allows to run while a turn is in
+    /// flight (manifest `turn_local`); `""` covers the bare command and
+    /// `"*"` allows any argv.
+    pub turn_local_verbs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelStyle {
+    #[serde(default)]
+    pub fg: Option<String>,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub dim: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelSpan {
+    pub text: String,
+    #[serde(default)]
+    pub style: Option<PanelStyle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelPage {
+    pub tab: String,
+    pub title: String,
+    pub lines: Vec<Vec<PanelSpan>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelSpec {
+    pub title: String,
+    pub pages: Vec<PanelPage>,
+    #[serde(default)]
+    pub refreshable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickerItem {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickerSpec {
+    pub title: String,
+    pub items: Vec<PickerItem>,
+    #[serde(default)]
+    pub selected_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,6 +427,15 @@ pub enum CommandOutcome {
     AgentPicker(String),
 
     SubagentSettings(String),
+
+    Panel(PanelSpec),
+
+    Picker(PickerSpec),
+
+    Terminal {
+        argv: Vec<String>,
+        text: Option<String>,
+    },
 }
 
 #[async_trait]

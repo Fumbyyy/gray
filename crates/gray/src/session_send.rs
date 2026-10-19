@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-use crate::cron_serve;
+use crate::session_mailbox;
 use crate::session_store::{JsonlSessionStore, SessionId};
 
 pub const KIND: &str = "send";
@@ -23,8 +23,10 @@ pub struct SendMsg {
     pub attachments: Vec<PathBuf>,
 }
 
+pub(crate) const SEND_FROM_PREFIX: &str = "↳ from ";
+
 pub fn prompt_for(from: &str, text: &str) -> String {
-    format!("↳ from {from}\n{text}")
+    format!("{SEND_FROM_PREFIX}{from}\n{text}")
 }
 
 pub fn default_label() -> String {
@@ -142,11 +144,11 @@ pub fn enqueue(
     text: &str,
     attachments: &[PathBuf],
 ) -> anyhow::Result<String> {
-    let dir = cron_serve::session_inbox(home, session)
+    let dir = session_mailbox::session_inbox(home, session)
         .ok_or_else(|| anyhow::anyhow!("unsafe session id {session:?}"))?;
     private_dir(&dir)?;
     let id = uuid::Uuid::new_v4().to_string();
-    cron_serve::write_entry(&dir, &entry_json(&id, from, text, attachments, None))?;
+    session_mailbox::write_entry(&dir, &entry_json(&id, from, text, attachments, None))?;
     Ok(id)
 }
 
@@ -188,7 +190,7 @@ fn pending_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 pub fn claim_all(home: &Path, session: &str) -> Vec<SendMsg> {
-    let Some(dir) = cron_serve::session_inbox(home, session) else {
+    let Some(dir) = session_mailbox::session_inbox(home, session) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -213,7 +215,7 @@ pub fn claim_all(home: &Path, session: &str) -> Vec<SendMsg> {
 }
 
 pub fn peek_sends(home: &Path, session: &str) -> Vec<SendMsg> {
-    let Some(dir) = cron_serve::session_inbox(home, session) else {
+    let Some(dir) = session_mailbox::session_inbox(home, session) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -232,7 +234,7 @@ pub fn peek_sends(home: &Path, session: &str) -> Vec<SendMsg> {
 }
 
 pub fn claim_steerable(home: &Path, session: &str) -> Option<SendMsg> {
-    let dir = cron_serve::session_inbox(home, session)?;
+    let dir = session_mailbox::session_inbox(home, session)?;
     for path in pending_files(&dir) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -283,7 +285,7 @@ pub fn hold_back(msgs: &[SendMsg]) {
 }
 
 fn hold_back_one(home: &Path, m: &SendMsg) -> anyhow::Result<()> {
-    let dir = cron_serve::session_inbox(home, &m.session)
+    let dir = session_mailbox::session_inbox(home, &m.session)
         .ok_or_else(|| anyhow::anyhow!("unsafe session id {:?}", m.session))?;
     private_dir(&dir)?;
     let body = entry_json(
@@ -293,7 +295,7 @@ fn hold_back_one(home: &Path, m: &SendMsg) -> anyhow::Result<()> {
         &m.attachments,
         Some(now_ms() + RETRY_MS),
     );
-    cron_serve::write_entry(&dir, &body)?;
+    session_mailbox::write_entry(&dir, &body)?;
     remove_receipt(home, &m.id);
     Ok(())
 }

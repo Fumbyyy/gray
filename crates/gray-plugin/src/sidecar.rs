@@ -12,7 +12,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, timeout};
 
-use gray_core::agent::{CommandOutcome, InputSubmit, Tool, ToolContext, ToolOutput};
+use gray_core::agent::{
+    CommandOutcome, InputSubmit, PanelSpec, PickerSpec, Tool, ToolContext, ToolOutput,
+};
 use gray_core::credential::CredentialMaterial;
 use gray_core::message::{Message, ToolDef};
 
@@ -20,7 +22,7 @@ use crate::{
     CoreEvent, DYNAMIC_PROTOCOL, Manifest, PROVIDER_CREDENTIALS, Plugin, ProviderAuthPoll,
     ProviderAuthStart, ProviderChatRequest, ProviderChatResult, ProviderModelCatalog,
     ProviderModelsRequest, ProviderRefreshRequest, ProviderRevokeRequest, ProviderRevokeResult,
-    ProviderRpcError, ToolBefore, manifest_tools,
+    ProviderRpcError, ToolBefore,
 };
 
 pub type HostHandler = Arc<
@@ -51,7 +53,25 @@ pub const ASK_TTL: Duration = Duration::from_secs(330);
 pub const ASK_HANDLER_TTL: Duration = Duration::from_secs(300);
 
 fn session_json(id: &str, cwd: &str) -> Value {
-    json!({"id": id, "cwd": cwd})
+    let mut v = json!({"id": id, "cwd": cwd});
+    if let Some(m) = active_model() {
+        v["model"] = m;
+    }
+    v
+}
+
+static ACTIVE_MODEL: std::sync::OnceLock<std::sync::RwLock<Value>> = std::sync::OnceLock::new();
+
+pub fn set_active_model(model: Value) {
+    let cell = ACTIVE_MODEL.get_or_init(|| std::sync::RwLock::new(Value::Null));
+    *cell.write().unwrap_or_else(|e| e.into_inner()) = model;
+}
+
+fn active_model() -> Option<Value> {
+    ACTIVE_MODEL
+        .get()
+        .and_then(|c| c.read().ok().map(|g| g.clone()))
+        .filter(|v| !v.is_null())
 }
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -365,6 +385,20 @@ fn spawn_reader(
     });
 }
 
+fn short_exit_status(status: &std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exit {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return format!("signal {sig}");
+        }
+    }
+    "terminated".to_string()
+}
+
 impl Transport {
     fn name_of(argv: &[String]) -> String {
         argv.first()
@@ -410,13 +444,17 @@ impl Transport {
 
     async fn ensure_alive(&self) -> bool {
         let mut child = self.child.lock().await;
-        let status = match child.try_wait() {
+        let (status, clean, wait_err) = match child.try_wait() {
             Ok(None) => return true,
-            Ok(Some(s)) => s.to_string(),
-            Err(e) => e.to_string(),
+            Ok(Some(s)) => (short_exit_status(&s), s.success(), None),
+            Err(e) => ("unknown".to_string(), false, Some(e.to_string())),
         };
         let name = Self::name_of(&self.argv);
-        log::warn!(target: "gray_plugin", "sidecar child exited, respawning");
+        if clean {
+            log::info!(target: "gray_plugin", "sidecar {name} exited cleanly, respawning");
+        } else {
+            log::warn!(target: "gray_plugin", "sidecar {name} exited ({status}), respawning");
+        }
         match spawn_child(&self.argv) {
             Ok((new_child, stdin, stdout)) => {
                 *child = new_child;
@@ -435,26 +473,46 @@ impl Transport {
                     Self::name_of(&self.argv),
                     p.epoch,
                 );
-                self.say(format!(
-                    "plugin {name} exited ({status}) — restarted; see ~/.gray/logs/sidecar-stderr.log"
-                ))
-                .await;
+                if !clean {
+                    self.say(&name, &status, true, wait_err).await;
+                }
                 true
             }
             Err(e) => {
                 log::warn!(target: "gray_plugin", "sidecar respawn failed: {e}");
-                self.say(format!(
-                    "plugin {name} exited ({status}) and could not be restarted: {e}; see ~/.gray/logs/sidecar-stderr.log"
-                ))
-                .await;
+                let error = Some(format!("{e}"));
+                self.say(&name, &status, false, error).await;
                 false
             }
         }
     }
 
-    async fn say(&self, text: String) {
+    async fn say(&self, plugin: &str, status: &str, restarted: bool, error: Option<String>) {
+        let text = if restarted {
+            format!(
+                "plugin {plugin} exited ({status}) — restarted; see ~/.gray/logs/sidecar-stderr.log"
+            )
+        } else {
+            let why = error
+                .as_deref()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default();
+            format!(
+                "plugin {plugin} exited ({status}) and could not be restarted{why}; see ~/.gray/logs/sidecar-stderr.log"
+            )
+        };
+        let mut params = json!({
+            "text": text,
+            "kind": "plugin_crash",
+            "plugin": plugin,
+            "status": status,
+            "restarted": restarted,
+        });
+        if let Some(e) = error {
+            params["error"] = json!(e);
+        }
         if let Some(h) = self.host_handler.lock().await.clone() {
-            let _ = h(HOST_SAY.to_string(), json!({"text": text})).await;
+            let _ = h(HOST_SAY.to_string(), params).await;
         }
     }
 
@@ -570,10 +628,24 @@ impl Transport {
 }
 
 fn build_tools(transport: &Arc<Transport>, tools: &Value, asks: bool) -> Vec<Arc<dyn Tool>> {
-    manifest_tools(&json!({"tools": tools}))
-        .into_iter()
-        .map(|entry| Arc::new(SidecarTool::new(entry, transport.clone(), asks)) as Arc<dyn Tool>)
-        .collect()
+    tools
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|raw| {
+                    let def = crate::parse_tool_entry(raw)?;
+                    let timeout_secs = raw
+                        .get("timeout_secs")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n.min(21600));
+                    Some(
+                        Arc::new(SidecarTool::new(def, transport.clone(), asks, timeout_secs))
+                            as Arc<dyn Tool>,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn refresh_tools_into(
@@ -582,7 +654,11 @@ async fn refresh_tools_into(
     asks: bool,
 ) -> anyhow::Result<usize> {
     let r = transport
-        .request("plugin/tools", Some(json!({})), HOST_TTL)
+        .request(
+            "plugin/tools",
+            Some(json!({"session": session_json("", "")})),
+            HOST_TTL,
+        )
         .await?;
     let new = build_tools(transport, r.get("tools").unwrap_or(&Value::Null), asks);
     let n = new.len();
@@ -646,6 +722,24 @@ impl SidecarPlugin {
         };
         if dynamic {
             plugin.install_tools_changed_handler();
+            {
+                let transport = Arc::downgrade(&plugin.transport);
+                let tools = Arc::downgrade(&plugin.tools);
+                let asks = plugin.asks;
+                let name = plugin.manifest.name.clone();
+                dynamic_refreshers().push(Arc::new(move || {
+                    let (Some(t), Some(tl)) = (transport.upgrade(), tools.upgrade()) else {
+                        return Box::pin(async { false });
+                    };
+                    let name = name.clone();
+                    Box::pin(async move {
+                        if let Err(e) = refresh_tools_into(&t, &tl, asks).await {
+                            log::warn!(target: "gray_plugin", "{name}: plugin/tools refresh failed: {e}");
+                        }
+                        true
+                    })
+                }));
+            }
 
             let transport = Arc::downgrade(&plugin.transport);
             let tools = Arc::downgrade(&plugin.tools);
@@ -1136,7 +1230,7 @@ impl Plugin for SidecarPlugin {
             .request("command/run", Some(params), Duration::from_secs(30))
             .await
             .ok()?;
-        command_outcome(&v)
+        command_outcome(&v, &self.transport.argv)
     }
     async fn on_event(&self, e: CoreEvent) {
         let session = session_json(&self.pinned_sid(), &self.cwd);
@@ -1336,14 +1430,16 @@ struct SidecarTool {
     transport: Arc<Transport>,
 
     asks: bool,
+    timeout_secs: Option<u64>,
 }
 
 impl SidecarTool {
-    fn new(def: ToolDef, transport: Arc<Transport>, asks: bool) -> Self {
+    fn new(def: ToolDef, transport: Arc<Transport>, asks: bool, timeout_secs: Option<u64>) -> Self {
         Self {
             def,
             transport,
             asks,
+            timeout_secs,
         }
     }
 
@@ -1362,24 +1458,59 @@ impl Tool for SidecarTool {
     }
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
         let name = self.def.name.clone();
-        let cwd = ctx.cwd.to_string_lossy();
+        let cwd = ctx.cwd.to_string_lossy().into_owned();
         let sid = ctx.session_id.as_deref().unwrap_or("");
         log::debug!(target: "gray_plugin", "plugin tool call: {name} (plugin-provided, session {sid})");
         let params = json!({"name": name, "args": args, "session": session_json(sid, &cwd)});
-        let ttl = if self.transport_asks() {
-            ASK_TTL
-        } else {
-            HOST_TTL
+        let ttl = self
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| {
+                if self.transport_asks() {
+                    ASK_TTL
+                } else {
+                    HOST_TTL
+                }
+            });
+        let transport = self.transport.clone();
+        let cancel = ctx.cancel.clone();
+        let call =
+            tokio::spawn(async move { transport.request("tool/call", Some(params), ttl).await });
+        let outcome = tokio::select! {
+            r = call => r.unwrap_or_else(|e| Err(anyhow::anyhow!("sidecar task join failed: {e}"))),
+            _ = cancel.cancelled() => {
+                let name = self.def.name.clone();
+                let cwd = ctx.cwd.to_string_lossy().into_owned();
+                let sid = ctx.session_id.as_deref().unwrap_or("").to_string();
+                let t = self.transport.clone();
+                tokio::spawn(async move {
+                    t.send_notification(
+                        "tool/cancel",
+                        json!({"name": name, "session": session_json(&sid, &cwd)}),
+                    )
+                    .await;
+                });
+                return ToolOutput::error("cancelled by user");
+            }
         };
-        match self.transport.request("tool/call", Some(params), ttl).await {
+        match outcome {
             Ok(v) => {
                 let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
                 let content = v.get("content").and_then(|c| c.as_str());
+                let usage = v
+                    .get("usage")
+                    .and_then(|u| serde_json::from_value::<gray_core::event::Usage>(u.clone()).ok())
+                    .map(Box::new);
                 match (is_error, content) {
-                    (true, c) => gray_core::tool_out::fail(c.unwrap_or_default().to_string()),
+                    (true, c) => {
+                        let mut out = gray_core::tool_out::fail(c.unwrap_or_default().to_string());
+                        out.usage = usage;
+                        out
+                    }
                     (false, Some(c)) => {
                         let mut out = gray_core::tool_out::finish(c.to_string());
                         attach_media(&name, &mut out, &v);
+                        out.usage = usage;
                         out
                     }
 
@@ -1439,8 +1570,17 @@ fn attach_media(name: &str, out: &mut ToolOutput, reply: &Value) {
     }
 }
 
-pub(crate) fn command_outcome(v: &Value) -> Option<CommandOutcome> {
+pub(crate) fn command_outcome(v: &Value, plugin_argv: &[String]) -> Option<CommandOutcome> {
     let field = |k: &str| v.get(k).and_then(|t| t.as_str()).filter(|t| !t.is_empty());
+    if let Some(args) = v.get("terminal").and_then(Value::as_array)
+        && !plugin_argv.is_empty()
+    {
+        let args = args.iter().filter_map(|a| a.as_str().map(str::to_string));
+        return Some(CommandOutcome::Terminal {
+            argv: plugin_argv.iter().cloned().chain(args).collect(),
+            text: field("text").map(str::to_string),
+        });
+    }
     if let Some(plugin) = field("subagent_settings") {
         return Some(CommandOutcome::SubagentSettings(plugin.to_string()));
     }
@@ -1453,9 +1593,67 @@ pub(crate) fn command_outcome(v: &Value) -> Option<CommandOutcome> {
     if let Some(p) = field("prompt") {
         return Some(CommandOutcome::Prompt(p.to_string()));
     }
+    if let Some(spec) = v.get("panel") {
+        return Some(match serde_json::from_value::<PanelSpec>(spec.clone()) {
+            Ok(spec) => CommandOutcome::Panel(spec),
+            Err(e) => match field("text") {
+                Some(t) => CommandOutcome::Say(t.to_string()),
+                None => CommandOutcome::Say(format!("invalid panel result: {e}")),
+            },
+        });
+    }
+    if let Some(spec) = v.get("picker") {
+        return Some(match serde_json::from_value::<PickerSpec>(spec.clone()) {
+            Ok(spec) => CommandOutcome::Picker(spec),
+            Err(e) => match field("text") {
+                Some(t) => CommandOutcome::Say(t.to_string()),
+                None => CommandOutcome::Say(format!("invalid picker result: {e}")),
+            },
+        });
+    }
     field("text").map(|t| CommandOutcome::Say(t.to_string()))
 }
 
 #[path = "sidecar_tests.rs"]
 #[cfg(test)]
 mod tests;
+
+type DynRefresher = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync,
+>;
+
+fn dynamic_refreshers() -> std::sync::MutexGuard<'static, Vec<DynRefresher>> {
+    static REFRESHERS: std::sync::OnceLock<std::sync::Mutex<Vec<DynRefresher>>> =
+        std::sync::OnceLock::new();
+    REFRESHERS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+pub async fn refresh_dynamic_tools() {
+    let fns: Vec<DynRefresher> = dynamic_refreshers().clone();
+    let mut set = tokio::task::JoinSet::new();
+    for (i, f) in fns.iter().enumerate() {
+        let f = f.clone();
+        set.spawn(async move {
+            let alive = tokio::time::timeout(std::time::Duration::from_secs(3), f())
+                .await
+                .unwrap_or(true);
+            (i, alive)
+        });
+    }
+    let mut alive = vec![true; fns.len()];
+    while let Some(res) = set.join_next().await {
+        if let Ok((i, a)) = res {
+            alive[i] = a;
+        }
+    }
+    let n = fns.len();
+    let mut idx = 0;
+    dynamic_refreshers().retain(|_| {
+        let keep = idx >= n || alive[idx];
+        idx += 1;
+        keep
+    });
+}

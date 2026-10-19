@@ -114,28 +114,17 @@ where
         area.height = height.min(screen_size.height);
         area.width = screen_size.width;
         let bottom = screen_size.height.saturating_sub(area.height);
-        // A band flush with the screen bottom stays flush: shrinking re-pins
-        // it instead of leaving the band floating on its old top.
-        let grounded = !old.is_empty() && old.bottom() >= screen_size.height;
-        area.y = if grounded { bottom } else { area.y.min(bottom) };
+        // The band keeps its top row: a shrink leaves the vacated rows
+        // below the band, the same state as the band floating under the
+        // intro at startup.
+        area.y = area.y.min(bottom);
         let wanted_bottom = old.y.saturating_add(area.height);
         if wanted_bottom > screen_size.height && !screen_shrank {
-            let overflow = wanted_bottom - screen_size.height;
-            self.scroll_history_up(old.y, overflow)?;
-        }
-
-        // Grounded shrink: slide the transcript region down with the band so
-        // the transcript's tail stays flush with the band's new top — the dead
-        // space lands at the top of the screen, not between transcript and
-        // band or below the band.
-        let slid =
-            grounded && !screen_shrank && area.y > old.y && self.scrollback == Scrollback::Regions;
-        if slid {
-            self.scroll_region_down(area.y, area.y - old.y)?;
+            self.scroll_history_up(old.y, wanted_bottom - screen_size.height)?;
         }
 
         if area != self.viewport_area {
-            let from = if self.viewport_area.is_empty() || slid {
+            let from = if self.viewport_area.is_empty() {
                 area.y
             } else {
                 area.y.min(self.viewport_area.y)
@@ -147,8 +136,10 @@ where
     }
 
     pub fn clear_after_position(&mut self, position: Position) -> io::Result<()> {
-        self.backend.set_cursor_position(position)?;
-        self.backend.clear_region(ClearType::AfterCursor)?;
+        if position.y < self.last_known_screen_size.height {
+            self.backend.set_cursor_position(position)?;
+            self.backend.clear_region(ClearType::AfterCursor)?;
+        }
 
         self.buffers[1 - self.current].reset();
         Ok(())
@@ -278,6 +269,7 @@ where
             self.insert_full_screen(rows)?;
         }
         Backend::flush(&mut self.backend)?;
+        crate::quality_of_life::kitty::flush_transmits();
         Ok(())
     }
 
@@ -314,19 +306,6 @@ where
 
         self.clear_after_position(Position::new(0, top))?;
         self.scroll_screen_up(n)
-    }
-
-    fn scroll_region_down(&mut self, bottom: u16, n: u16) -> io::Result<()> {
-        if n == 0 || bottom <= 1 {
-            return Ok(());
-        }
-        write!(self.backend, "\x1b[1;{bottom}r")?;
-        self.backend.set_cursor_position(Position::new(0, 0))?;
-        for _ in 0..n {
-            write!(self.backend, "\x1bM")?;
-        }
-        write!(self.backend, "\x1b[r")?;
-        Ok(())
     }
 
     fn scroll_region_up(&mut self, top: u16, n: u16) -> io::Result<()> {

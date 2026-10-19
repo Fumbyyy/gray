@@ -85,12 +85,19 @@ echo "→ installed to ${DEST}/gray (${INSTALLED_VER:-?}, ${CHANNEL})"
 FLAVOR="core"
 if [ "${GRAY_INSTALL_PLUGINS:-1}" != "0" ]; then
     FLAVOR="full"
-    PLUGINS="${GRAY_PLUGINS:-account memory search questions subagents mcp gateway}"
+    DEFAULT_PLUGINS="account memory search questions subagents mcp qol hands gateway"
+    [ "$(uname -s)" = Linux ] && DEFAULT_PLUGINS="${DEFAULT_PLUGINS} fsearch"
+    PLUGINS="${GRAY_PLUGINS:-$DEFAULT_PLUGINS}"
     FAILED=""
     set -f
     for plugin in $PLUGINS; do
         if "${DEST}/gray" plugin install --yes "$plugin" >/dev/null 2>&1; then
-            echo "→ installed gray-${plugin}"
+            echo "→ installed ${plugin}"
+            # fsearch's grep/rg stand-ins need shell.env; installing the
+            # default set is the consent, so grant it here (best-effort).
+            if [ "$plugin" = fsearch ]; then
+                "${DEST}/gray" plugin capabilities fsearch --all >/dev/null 2>&1 || true
+            fi
         else
             FAILED="${FAILED} ${plugin}"
         fi

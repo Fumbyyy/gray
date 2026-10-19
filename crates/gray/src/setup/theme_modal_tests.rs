@@ -13,12 +13,15 @@ fn twelve() -> Vec<Row> {
 }
 
 fn screen(w: u16, h: u16, rows: &[Row], sel: usize) -> Vec<String> {
-    let refs: Vec<&Row> = rows.iter().collect();
-    let list_h = list_rows_for(h, refs.len());
+    let filtered: Vec<usize> = (0..rows.len()).collect();
+    let picker = picker(rows, sel, None);
+    let list_h = crate::repl::picker::list_rows_for(h, filtered.len(), specimen_lines().len());
     let bg = BackgroundSnapshot::default_initial();
     let mut terminal = ratatui::Terminal::new(TestBackend::new(w, h)).expect("test terminal");
     terminal
-        .draw(|frame| draw_picker(frame, &bg, &refs, sel, "", list_h))
+        .draw(|frame| {
+            crate::repl::picker::draw_list_picker(frame, &bg, &picker, &filtered, sel, "", list_h)
+        })
         .expect("draw picker");
     let buf = terminal.backend().buffer();
     (0..h)
@@ -48,9 +51,7 @@ fn list_scrolls_to_keep_the_selection_on_screen() {
 }
 
 #[test]
-fn list_rows_leave_room_for_the_specimen() {
-    assert_eq!(list_rows_for(20, 12), 9);
-    assert_eq!(list_rows_for(24, 12), 12);
-    assert_eq!(list_rows_for(20, 0), 1);
-    assert_eq!(list_rows_for(8, 12), 1);
+fn rows_start_with_the_builtin_theme() {
+    let rows = rows();
+    assert_eq!(rows[0].name, theme::BUILTIN_THEME_NAME);
 }

@@ -245,6 +245,7 @@ async fn a_late_timer_skips_the_refresh() {
         Arc::new(Mutex::new(WarmHint {
             prompt_tokens: 100_000,
             cache_reported: true,
+            ..Default::default()
         })),
         sent,
         Arc::new(Mutex::new(Usage::default())),

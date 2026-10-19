@@ -509,13 +509,14 @@ pub(crate) async fn startup_interrupted_hint(cwd: &std::path::Path) -> Option<St
 pub async fn run_resume_picker(
     show_all: bool,
     bg: Option<&crate::setup::BackgroundSnapshot>,
+    current: Option<SessionId>,
 ) -> anyhow::Result<Option<SessionId>> {
     let root = crate::session_store::default_root()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve home"))?;
     let store = JsonlSessionStore::new(root);
 
     let scan = store.scan(None, true);
-    run_picker_sync(show_all, scan, &store, bg)
+    run_picker_sync(show_all, scan, &store, bg, current)
 }
 
 fn run_picker_sync(
@@ -523,6 +524,7 @@ fn run_picker_sync(
     mut scan: tokio::sync::mpsc::UnboundedReceiver<SessionScanEvent>,
     store: &JsonlSessionStore,
     bg: Option<&crate::setup::BackgroundSnapshot>,
+    current: Option<SessionId>,
 ) -> anyhow::Result<Option<SessionId>> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
     use ratatui::layout::Rect;
@@ -636,9 +638,31 @@ fn run_picker_sync(
                     "Sessions"
                 };
                 let esc_str = "esc";
-                let pad_len = (inner.width as usize)
-                    .saturating_sub(title.chars().count() + esc_str.chars().count() + 8);
-                let header = Line::from(vec![
+                let hints_str = "tab: all/cwd  shift-tab: status  ctrl-g: system  ";
+                let cur_name = current.as_ref().map(|c| c.as_str());
+                let name_len = cur_name.map_or(0, |n| n.chars().count() + 8);
+                let show_hints = cur_name.is_none()
+                    || title.chars().count()
+                        + name_len
+                        + hints_str.chars().count()
+                        + esc_str.chars().count()
+                        <= inner.width as usize;
+                let pad_len = if cur_name.is_some() {
+                    (inner.width as usize).saturating_sub(
+                        title.chars().count()
+                            + name_len
+                            + esc_str.chars().count()
+                            + if show_hints {
+                                hints_str.chars().count()
+                            } else {
+                                0
+                            },
+                    )
+                } else {
+                    (inner.width as usize)
+                        .saturating_sub(title.chars().count() + esc_str.chars().count() + 8)
+                };
+                let mut header_spans = vec![
                     Span::styled(
                         title,
                         Style::default()
@@ -647,12 +671,29 @@ fn run_picker_sync(
                             .bg(box_bg),
                     ),
                     Span::styled(" ".repeat(pad_len), Style::default().bg(box_bg)),
-                    Span::styled(
-                        "tab: all/cwd  shift-tab: status  ctrl-g: system  ",
+                ];
+                if let Some(name) = cur_name {
+                    header_spans.push(Span::styled(
+                        "this: ",
                         Style::default().fg(text_dim).bg(box_bg),
-                    ),
-                    Span::styled(esc_str, Style::default().fg(text_dim).bg(box_bg)),
-                ]);
+                    ));
+                    header_spans.push(Span::styled(
+                        name.to_string(),
+                        Style::default().fg(accent_peach).bg(box_bg),
+                    ));
+                    header_spans.push(Span::styled("  ", Style::default().fg(text_dim).bg(box_bg)));
+                }
+                if show_hints {
+                    header_spans.push(Span::styled(
+                        hints_str,
+                        Style::default().fg(text_dim).bg(box_bg),
+                    ));
+                }
+                header_spans.push(Span::styled(
+                    esc_str,
+                    Style::default().fg(text_dim).bg(box_bg),
+                ));
+                let header = Line::from(header_spans);
                 frame.render_widget(
                     Paragraph::new(header),
                     Rect::new(inner.x, inner.y, inner.width, 1),

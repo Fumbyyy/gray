@@ -12,21 +12,26 @@ pub(crate) struct TurnLocalCommands {
     pub hooks: Vec<std::sync::Arc<dyn gray_core::agent::PluginHooks>>,
 }
 
-fn subagents_view_args(text: &str) -> Option<Vec<String>> {
+fn plugin_turn_local_args(
+    text: &str,
+    hooks: &[std::sync::Arc<dyn gray_core::agent::PluginHooks>],
+) -> Option<Vec<String>> {
     let (name, args) = super::split_plugin_command(text)?;
-    if !name.eq_ignore_ascii_case("/subagents") {
-        return None;
-    }
-    const MUTATING: &[&str] = &[
-        "run", "steer", "chat", "stop", "settings", "setup", "widget",
-    ];
-    (!args
-        .first()
-        .is_some_and(|verb| MUTATING.contains(&verb.as_str())))
-    .then_some(args)
+    let cmd = hooks
+        .iter()
+        .flat_map(|h| h.commands())
+        .find(|c| c.name == name)?;
+    let verb = args.first().map(String::as_str).unwrap_or("");
+    cmd.turn_local_verbs
+        .iter()
+        .any(|v| v == "*" || v == verb)
+        .then_some(args)
 }
 
-pub(crate) fn is_turn_local_command(text: &str) -> bool {
+pub(crate) fn is_turn_local_command(
+    text: &str,
+    hooks: &[std::sync::Arc<dyn gray_core::agent::PluginHooks>],
+) -> bool {
     match super::parse_command(text) {
         super::ReplCommand::Usage | super::ReplCommand::Jobs | super::ReplCommand::Help => true,
 
@@ -37,11 +42,7 @@ pub(crate) fn is_turn_local_command(text: &str) -> bool {
         | super::ReplCommand::Intro(_)
         | super::ReplCommand::Gateway(_)
         | super::ReplCommand::Hehe => true,
-        super::ReplCommand::CronJobs(arg) => arg
-            .as_deref()
-            .and_then(super::handlers::parse_on_off)
-            .is_none(),
-        super::ReplCommand::Unknown(_) => subagents_view_args(text).is_some(),
+        super::ReplCommand::Unknown(_) => plugin_turn_local_args(text, hooks).is_some(),
         _ => false,
     }
 }
@@ -98,26 +99,6 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                     super::jobs::dashboard(&jobs, &wakes, crate::cron::now_secs())
                 })
                 .unwrap_or_else(|e| format!("jobs dashboard failed: {e}"));
-            super::say(tui, &text);
-        }
-        super::ReplCommand::CronJobs(arg) => {
-            let text = crate::setup::gray_home()
-                .and_then(|home| {
-                    let store = crate::cron::CronStore::open(home.join("cron"))?;
-                    let jobs = store.list()?;
-                    let now = crate::cron::now_secs();
-                    let health = store.health(now).ok();
-                    Ok(match arg {
-                        None => super::cron::format_cron_dashboard(&jobs, health.as_ref(), now),
-                        Some(id) => match jobs.into_iter().find(|j| j.id == id || j.name == id) {
-                            Some(j) => {
-                                super::cron::format_cron_dashboard(&[j], health.as_ref(), now)
-                            }
-                            None => format!("unknown cron job {id:?}"),
-                        },
-                    })
-                })
-                .unwrap_or_else(|e: anyhow::Error| format!("cron dashboard failed: {e}"));
             super::say(tui, &text);
         }
         super::ReplCommand::Help => {
@@ -197,39 +178,53 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                 );
             }
         }
-        super::ReplCommand::Unknown(_) => {
-            let Some(args) = subagents_view_args(text) else {
+        super::ReplCommand::Unknown(cmd) => {
+            let Some((name, argv)) = super::split_plugin_command(&cmd) else {
                 return;
             };
-            if args.is_empty() {
-                let bg = ctx.tui.lock().expect("tui lock").snapshot();
-                let action = super::with_modal_sync(tui, || {
-                    super::agents_panel::run_agents_viewer("subagents", Some(&bg))
-                });
-                match action {
-                    Ok(Some(super::agents_panel::PanelAction::Say(text))) => {
-                        super::say(tui, &text);
-                    }
-                    Ok(Some(super::agents_panel::PanelAction::Resume { .. })) => {
-                        super::say(tui, "that agent can be resumed after the current turn");
-                    }
-                    Ok(None) => {
-                        ctx.tui.lock().expect("tui lock").ensure_gap();
-                    }
-                    Err(e) => super::say(tui, &format!("agents panel error: {e}")),
+            use gray_core::agent::CommandOutcome;
+            let outcome = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(super::run_plugin_command(&ctx.hooks, &name, argv))
+            });
+            match outcome {
+                Some(CommandOutcome::Say(text)) => super::say(tui, &text),
+                Some(CommandOutcome::Prompt(prompt)) => {
+                    let mut t = ctx.tui.lock().expect("tui lock");
+                    t.queued_inputs.push_back((prompt, Vec::new()));
+                    let _ = t.draw();
                 }
-            } else {
-                let shared = ctx.tui.clone();
-                std::thread::spawn(move || {
-                    let tui = Some(&shared);
-                    match super::agents_panel::run_subagents_view(&args) {
-                        Some(text) => super::say(tui, &text),
-                        None => super::say(
-                            tui,
-                            "subagents: no CLI in the plugin lock — install it first",
-                        ),
+                Some(CommandOutcome::AgentPicker(plugin)) => {
+                    let bg = ctx.tui.lock().expect("tui lock").snapshot();
+                    let action = super::with_modal_sync(tui, || {
+                        super::agents_panel::run_agents_viewer(&plugin, Some(&bg))
+                    });
+                    match action {
+                        Ok(Some(super::agents_panel::PanelAction::Say(text))) => {
+                            super::say(tui, &text);
+                        }
+                        Ok(Some(super::agents_panel::PanelAction::Resume { .. })) => {
+                            super::say(tui, "that agent can be resumed after the current turn");
+                        }
+                        Ok(None) => {
+                            ctx.tui.lock().expect("tui lock").ensure_gap();
+                        }
+                        Err(e) => super::say(tui, &format!("agents panel error: {e}")),
                     }
-                });
+                }
+                Some(CommandOutcome::ModelPicker(_))
+                | Some(CommandOutcome::SubagentSettings(_))
+                | Some(CommandOutcome::Panel(_))
+                | Some(CommandOutcome::Picker(_))
+                | Some(CommandOutcome::Terminal { .. }) => {
+                    // Pickers and settings mutate session state and own the
+                    // modal surface — rerun through the full dispatch once
+                    // the turn ends instead of racing the running turn.
+                    let mut t = ctx.tui.lock().expect("tui lock");
+                    t.queued_inputs.push_back((cmd.clone(), Vec::new()));
+                    let _ = t.draw();
+                }
+                None => {}
             }
         }
         _ => {}
@@ -368,7 +363,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                         KeyOutcome::Command(cmd) => {
                             if t.attachments.is_empty()
                                 && let Some(locals) = turn_locals.as_ref()
-                                && is_turn_local_command(&cmd)
+                                && is_turn_local_command(&cmd, &locals.hooks)
                             {
                                 t.flush_markdown();
                                 t.end_thinking();
@@ -397,8 +392,9 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                 continue;
                             }
                             let local = t.attachments.is_empty()
-                                && is_turn_local_command(&text)
-                                && turn_locals.is_some();
+                                && turn_locals
+                                    .as_ref()
+                                    .is_some_and(|l| is_turn_local_command(&text, &l.hooks));
                             if local {
                                 t.flush_markdown();
                                 t.end_thinking();

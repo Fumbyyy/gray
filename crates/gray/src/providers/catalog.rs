@@ -64,7 +64,7 @@ pub async fn connect_dynamic_provider(
         installed.clone(),
         store,
         Arc::clone(&runtime.rpc()) as Arc<dyn ProviderRpc>,
-        config.model.clone(),
+        crate::setup::wire_model_for(config).or_else(|| config.model.clone()),
     );
     Ok(DynamicProvider {
         installed,
@@ -182,7 +182,7 @@ pub async fn fetch_models_for_config(config: &Config) -> Vec<(String, String)> {
     let Some(installed) = resolve_provider_connection(config, &home) else {
         return Vec::new();
     };
-    let Ok(runtime) = ProviderRuntime::start(installed.clone()).await else {
+    let Ok(runtime) = shared_runtime(installed.clone()).await else {
         return Vec::new();
     };
 
@@ -213,7 +213,7 @@ pub async fn fetch_models_for_config(config: &Config) -> Vec<(String, String)> {
             installed.clone(),
             store.clone(),
             Arc::clone(&runtime.rpc()) as Arc<dyn ProviderRpc>,
-            config.model.clone(),
+            crate::setup::wire_model_for(config).or_else(|| config.model.clone()),
         );
         if source.acquire().await.is_err() {
             return Vec::new();

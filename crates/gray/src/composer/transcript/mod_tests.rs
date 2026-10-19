@@ -184,7 +184,7 @@ fn unboundaryed_punctuation_only_chunks_are_held_not_rendered() {
 #[test]
 fn user_prompt_wraps_at_word_boundaries() {
     let text = "write a very long poem about the restless sea";
-    let lines = format_user_prompt_lines(text, 24);
+    let lines = format_user_prompt_lines(text, &[], 24);
 
     let bodies: Vec<String> = lines
         .iter()
@@ -206,7 +206,7 @@ fn user_prompt_wraps_at_word_boundaries() {
 #[test]
 fn user_prompt_wraps_wide_chars_by_cells() {
     let text = "界界界界界";
-    let lines = format_user_prompt_lines(text, 6);
+    let lines = format_user_prompt_lines(text, &[], 6);
     let bodies: Vec<Span<'static>> = lines
         .iter()
         .filter_map(|l| l.spans.get(1).cloned())
@@ -493,10 +493,10 @@ fn prose_and_card_glyphs_share_the_gutter_column() {
     assert_eq!(first_glyph(&prose[0]), GUTTER);
     let card = format_tool_box_lines(Line::from("● Ran cargo fmt"), &[], 80);
     assert_eq!(first_glyph(&card[1]), GUTTER);
-    let prompt = format_user_prompt_lines("rebuilt?", 80);
+    let prompt = format_user_prompt_lines("rebuilt?", &[], 80);
     assert_eq!(first_glyph(&prompt[1]), GUTTER);
 
-    let long = format_user_prompt_lines(&"word ".repeat(40), 40);
+    let long = format_user_prompt_lines(&"word ".repeat(40), &[], 40);
     assert_eq!(first_glyph(&long[2]), GUTTER + 2);
     for row in &long {
         let w: usize = row.spans.iter().map(|s| s.width()).sum();
@@ -547,7 +547,7 @@ fn the_backdrop_keeps_the_live_margins() {
 
 #[test]
 fn user_prompt_renders_attachment_markers_as_chips() {
-    let lines = format_user_prompt_lines("look [image: shot.png] here", 60);
+    let lines = format_user_prompt_lines("look [image: shot.png] here", &[], 60);
     let text: String = lines
         .iter()
         .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -555,4 +555,143 @@ fn user_prompt_renders_attachment_markers_as_chips() {
     assert!(!text.contains("[image:"), "{text}");
     assert!(text.contains(" IMAGE "), "{text}");
     assert!(text.contains("shot.png"), "{text}");
+}
+
+#[test]
+fn user_prompt_tiles_attached_images_side_by_side() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let red = ratatui::style::Color::Rgb(255, 0, 0);
+    let green = ratatui::style::Color::Rgb(0, 255, 0);
+    let paths: Vec<std::path::PathBuf> = [("a.png", [255, 0, 0, 255]), ("b.png", [0, 255, 0, 255])]
+        .into_iter()
+        .map(|(name, px)| {
+            let p = dir.path().join(name);
+            ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba(px))
+                .save(&p)
+                .expect("write png");
+            p
+        })
+        .collect();
+    let has = |l: &Line<'static>, c| l.spans.iter().any(|s| s.style.fg == Some(c));
+
+    let wide = format_user_prompt_lines("look", &paths, 200);
+    assert!(
+        wide.iter().any(|l| has(l, red) && has(l, green)),
+        "both previews share a row when they fit"
+    );
+    let row = wide.iter().find(|l| has(l, red) && has(l, green)).unwrap();
+    let first_green = row
+        .spans
+        .iter()
+        .position(|s| s.style.fg == Some(green))
+        .unwrap();
+    assert_eq!(
+        row.spans[first_green - 1].content.as_ref(),
+        "  ",
+        "gap between previews"
+    );
+
+    let narrow = format_user_prompt_lines("look", &paths, 40);
+    assert!(
+        !narrow.iter().any(|l| has(l, red) && has(l, green)),
+        "too wide to share a row"
+    );
+    let last_red = narrow.iter().rposition(|l| has(l, red)).unwrap();
+    let first_green = narrow.iter().position(|l| has(l, green)).unwrap();
+    assert!(
+        first_green > last_red + 1,
+        "a blank row separates stacked bands"
+    );
+}
+
+#[test]
+fn viewed_image_lines_preview_read_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let img = dir.path().join("slide.png");
+    ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([255, 0, 0, 255]))
+        .save(&img)
+        .expect("write png");
+    let args = serde_json::json!({"path": "slide.png"});
+    let rows = super::rows::viewed_image_lines("read", Some(&args), dir.path(), 40);
+    assert!(rows.is_some(), "read on an image should preview");
+}
+
+#[test]
+fn viewed_image_lines_preview_bash_cat() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let img = dir.path().join("slide.png");
+    ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([0, 255, 0, 255]))
+        .save(&img)
+        .expect("write png");
+    let cmd = format!("cat '{}'", img.display());
+    let args = serde_json::json!({"command": cmd});
+    let rows = super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40);
+    assert!(rows.is_some(), "cat image.png should preview");
+}
+
+#[test]
+fn viewed_image_lines_skip_non_image_bash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let args = serde_json::json!({"command": "cat notes.txt"});
+    assert!(super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40).is_none());
+    let args = serde_json::json!({"command": "cat x.png | head"});
+    assert!(super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40).is_none());
+}
+
+#[test]
+fn split_synthetic_prompt_parts_notifications() {
+    let (visible, notices) = split_synthetic_prompt("plain question");
+    assert_eq!(visible, "plain question");
+    assert!(notices.is_empty());
+
+    let (visible, notices) = split_synthetic_prompt(
+        "↳ from cli\nhi\n\n[Background task notification]\nBackground job a finished (exit 0) after 1s · log /tmp/x\ntail it\n\n[Background task notification]\nodd notice\nrest",
+    );
+    assert_eq!(visible, "↳ from cli\nhi");
+    assert_eq!(
+        notices,
+        vec![
+            "Background job a finished (exit 0) after 1s · log /tmp/x".to_string(),
+            "odd notice".to_string(),
+        ]
+    );
+
+    let (visible, notices) = split_synthetic_prompt(
+        "[Background task notification]\nBackground job b finished (exit 1) after 2s",
+    );
+    assert!(visible.is_empty());
+    assert_eq!(notices, vec!["Background job b finished (exit 1) after 2s"]);
+
+    // cron deliveries collapse the same way, and an interleaved
+    // `↳ from` send stays visible between notice segments
+    let (visible, notices) = split_synthetic_prompt(
+        "[Cron delivery: nightly]\nbuilt 3 crates ok\n\n↳ from cli\nhey\n\n[Background task notification]\nBackground job c finished (exit 0) after 3s",
+    );
+    assert_eq!(visible, "↳ from cli\nhey");
+    assert_eq!(
+        notices,
+        vec![
+            "built 3 crates ok".to_string(),
+            "Background job c finished (exit 0) after 3s".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn wrapped_rows_keep_the_leading_indent() {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let text =
+        "  plugin gray-gateway exited (exit 1) — restarted; see ~/.gray/logs/sidecar-stderr.log"
+            .to_string();
+    for max_w in [24usize, 40, 60] {
+        let rows = wrap_styled_line(Line::from(Span::styled(text.clone(), dim)), max_w);
+        assert!(rows.len() > 1, "expected a wrap at width {max_w}");
+        for row in &rows {
+            let row_text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                row_text.starts_with("  "),
+                "wrapped row lost its leading indent at width {max_w}: {row_text:?}"
+            );
+        }
+    }
 }
