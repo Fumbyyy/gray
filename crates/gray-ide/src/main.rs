@@ -17,9 +17,9 @@ mod workspace;
 use gpui_kit::*;
 use std::path::PathBuf;
 
-/// Same precedence as `gray_core::paths::user_home` and
-/// `crate::skills::dirs_home` so the IDE resolves the same home as the
-/// CLI on Windows (USERPROFILE) and unix (HOME).
+/// Same precedence as `gray_core::paths::user_home` so the IDE resolves
+/// the same home as the CLI on Windows (USERPROFILE) and unix (HOME).
+/// `crate::skills::discover` uses this too so skill roots stay consistent.
 fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {

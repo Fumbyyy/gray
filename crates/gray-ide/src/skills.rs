@@ -100,7 +100,7 @@ pub fn discover(work_root: Option<&Path>, agent_dir: &Path) -> Vec<Skill> {
     let mut visited = std::collections::HashSet::new();
     let mut scan = |dir: &Path, source: &str| scan_dir(dir, source, &mut out, &mut visited);
     scan(&agent_dir.join("skills"), "user");
-    if let Some(home) = dirs_home() {
+    if let Some(home) = crate::home_dir() {
         scan(&home.join(".agents").join("skills"), "user");
         let config_base = std::env::var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -138,17 +138,86 @@ pub fn discover(work_root: Option<&Path>, agent_dir: &Path) -> Vec<Skill> {
     out
 }
 
-fn dirs_home() -> Option<PathBuf> {
-    // Same precedence as `gray_core::paths::user_home` so the IDE and CLI
-    // resolve the same home when both HOME and USERPROFILE are set.
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .map(PathBuf::from)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tempdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gray-ide-skills-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
+
+    fn write_skill(dir: &Path, name: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: d\n---\n\nbody\n"),
+        )
+        .unwrap();
+    }
+
+    /// A directory symlink back into the tree must not recurse forever and
+    /// must surface the skill once. Windows symlink creation needs elevated
+    /// privileges or Developer Mode, so it degrades to a plain scan there.
+    #[test]
+    fn a_symlink_cycle_terminates() {
+        let root = tempdir("cycle");
+        let inner = root.join("skills").join("a");
+        write_skill(&inner, "cycleskill");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&inner, inner.join("loop")).unwrap();
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_dir(&inner, inner.join("loop"));
+
+        let mut out = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        scan_dir(&root.join("skills"), "user", &mut out, &mut visited);
+        let _ = fs::remove_dir_all(&root);
+
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["cycleskill"]);
+    }
+
+    /// A dir reachable both as the agent dir's `skills/` and as a project
+    /// ancestor is scanned once and keeps the earlier source label.
+    #[test]
+    fn shared_root_scans_once() {
+        let root = tempdir("dedup");
+        let agent_dir = root.join(".agents");
+        write_skill(&agent_dir.join("skills").join("dedupskill"), "dedupskill");
+
+        let found = discover(Some(&root), &agent_dir);
+        let _ = fs::remove_dir_all(&root);
+
+        let hits: Vec<&Skill> = found.iter().filter(|s| s.name == "dedupskill").collect();
+        assert_eq!(hits.len(), 1, "expected one dedupskill");
+        assert_eq!(hits[0].source, "user");
+    }
+
+    /// A project's `.claude/skills` dir is discovered at any ancestor.
+    #[test]
+    fn discovers_project_claude_skills() {
+        let root = tempdir("claude");
+        let work = root.join("proj").join("sub");
+        fs::create_dir_all(&work).unwrap();
+        write_skill(
+            &root.join("proj").join(".claude").join("skills").join("cdesk"),
+            "cdesk",
+        );
+
+        let found = discover(Some(&work), &root.join("agent"));
+        let _ = fs::remove_dir_all(&root);
+
+        let hits: Vec<&Skill> = found
+            .iter()
+            .filter(|s| s.name == "cdesk" && s.file.starts_with(&root))
+            .collect();
+        assert_eq!(hits.len(), 1, "expected one project cdesk");
+        assert_eq!(hits[0].source, "project");
     }
 }
