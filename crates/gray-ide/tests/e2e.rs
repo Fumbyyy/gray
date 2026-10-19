@@ -1158,3 +1158,60 @@ fn approval_gates_writes_in_readonly_mode() {
         "ok"
     );
 }
+
+#[test]
+fn settings_page_layouts_toggles_and_terminal_side() {
+    let Some(mut g) = Gray::start_with(
+        "settings-page",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    g.palette("Open settings");
+    g.wait_for("preferences page", |s| {
+        s["settings_open"] == true && s["settings_section"] == "preferences"
+    });
+    g.screenshot("settings-preferences");
+    g.palette("Settings: Shortcuts");
+    g.wait_for("shortcuts section", |s| {
+        s["settings_section"] == "shortcuts"
+    });
+    g.screenshot("settings-shortcuts");
+    g.palette("Settings: Preferences");
+    g.wait_for("back to preferences", |s| {
+        s["settings_open"] == true && s["settings_section"] == "preferences"
+    });
+
+    g.palette("Layout: Pro");
+    g.wait_for("pro layout", |s| s["layout"] == "pro");
+    g.palette("Terminal: Right");
+    g.wait_for("terminal right", |s| s["terminal_placement"] == "right");
+    g.palette("Auto-accept permissions: On");
+    g.wait_for("autoaccept on", |s| s["auto_accept"] == true);
+    g.key("Escape");
+    g.wait_for("settings closed", |s| s["settings_open"] == false);
+    g.screenshot("pro-rail");
+    g.key("ctrl+j");
+    g.wait_for("terminal open", |s| s["terminal_open"] == true);
+    g.screenshot("terminal-right");
+    g.key("ctrl+j");
+
+    g.send("first");
+    g.wait_for("reply", finished);
+    g.palette("Mode: Read only");
+    g.wait_for("readonly", |s| s["thread"]["mode"] == "readonly");
+    g.send("write auto.txt ok");
+    g.wait_for("auto approved", |s| finished(s) && s["approval"].is_null());
+    assert_eq!(
+        fs::read_to_string(g.project.join("auto.txt"))
+            .unwrap()
+            .trim(),
+        "ok"
+    );
+
+    g.restart();
+    g.wait_for("settings persist", |s| {
+        s["layout"] == "pro" && s["auto_accept"] == true && s["terminal_placement"] == "right"
+    });
+}
