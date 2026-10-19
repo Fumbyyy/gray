@@ -239,11 +239,24 @@ where
         self.current = 1 - self.current;
     }
 
+    /// All console output — frame diffs here, inserted transcript rows via
+    /// draw_rows — gets transliterated to ASCII when the terminal cannot
+    /// shape decorative glyphs. Every mapped glyph is single-width, so
+    /// positions from the diff still line up after transliteration.
     pub fn flush(&mut self) -> io::Result<()> {
-        let previous_buffer = &self.buffers[1 - self.current];
-        let current_buffer = &self.buffers[self.current];
-        let updates = previous_buffer.diff(current_buffer);
-        self.backend.draw(updates.into_iter())
+        let updates = {
+            let previous_buffer = &self.buffers[1 - self.current];
+            let current_buffer = &self.buffers[self.current];
+            previous_buffer.diff(current_buffer)
+        };
+        if crate::tui::unicode_safe() {
+            return self.backend.draw(updates.into_iter());
+        }
+        let owned: Vec<(u16, u16, Cell)> = updates
+            .into_iter()
+            .map(|(x, y, cell)| (x, y, ascii_cell(cell)))
+            .collect();
+        self.backend.draw(owned.iter().map(|(x, y, c)| (*x, *y, c)))
     }
 
     pub fn get_frame(&mut self) -> Frame<'_> {
@@ -415,7 +428,9 @@ where
     }
 
     fn draw_rows(&mut self, y: u16, rows: &[&[Cell]]) -> io::Result<()> {
+        let safe = crate::tui::unicode_safe();
         let mut cells = Vec::new();
+        let mut owned: Vec<(u16, u16, Cell)> = Vec::new();
         for (dy, row) in rows.iter().enumerate() {
             let mut covered = 0usize;
             for (x, cell) in row.iter().enumerate() {
@@ -423,12 +438,32 @@ where
                     covered -= 1;
                     continue;
                 }
-                covered = glyph_width(cell.symbol()).saturating_sub(1);
-                cells.push((x as u16, y + dy as u16, cell));
+                if safe {
+                    covered = glyph_width(cell.symbol()).saturating_sub(1);
+                    cells.push((x as u16, y + dy as u16, cell));
+                } else {
+                    let cell = ascii_cell(cell);
+                    covered = glyph_width(cell.symbol()).saturating_sub(1);
+                    owned.push((x as u16, y + dy as u16, cell));
+                }
             }
         }
-        self.backend.draw(cells.into_iter())
+        if safe {
+            self.backend.draw(cells.into_iter())
+        } else {
+            self.backend.draw(owned.iter().map(|(x, y, c)| (*x, *y, c)))
+        }
     }
+}
+
+/// Clone a cell with its symbol transliterated to ASCII. Symbols that have
+/// no decorative glyphs are cloned unchanged.
+fn ascii_cell(cell: &Cell) -> Cell {
+    let mut cell = cell.clone();
+    if let Some(symbol) = crate::tui::ascii_symbol(cell.symbol()) {
+        cell.set_symbol(&symbol);
+    }
+    cell
 }
 
 fn glyph_width(symbol: &str) -> usize {

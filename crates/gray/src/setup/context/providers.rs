@@ -1012,6 +1012,9 @@ pub(crate) fn load_provider_model_list_at(
 }
 
 pub(crate) fn save_provider_model_list(base_url: &str, models: &[(String, String)]) {
+    if cfg!(test) {
+        return;
+    }
     if let Ok(home) = crate::setup::catalog::gray_home() {
         save_provider_model_list_at(&home, base_url, models);
     }
@@ -1021,6 +1024,9 @@ pub(crate) fn save_provider_model_rows(
     base_url: &str,
     rows: Vec<crate::setup::variants::CachedRow>,
 ) {
+    if cfg!(test) {
+        return;
+    }
     if let Ok(home) = crate::setup::catalog::gray_home() {
         save_provider_model_rows_at(&home, base_url, rows);
     }
@@ -1869,6 +1875,11 @@ fn merged_models_cache(
 }
 
 pub fn save_models_cache_to_disk() {
+    // Unit tests share the real $GRAY_HOME — a mocked fetch succeeding must
+    // not persist the test models they seed the in-memory cache with.
+    if cfg!(test) {
+        return;
+    }
     let Some(path) = models_cache_path() else {
         return;
     };

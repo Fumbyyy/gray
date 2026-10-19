@@ -10,10 +10,14 @@ fn external_editor_decision() {
 }
 
 #[test]
-fn editor_defaults_to_vi_when_unset_or_blank() {
-    assert_eq!(editor_program(None), "vi");
-    assert_eq!(editor_program(Some("")), "vi");
-    assert_eq!(editor_program(Some("   ")), "vi");
+fn editor_defaults_to_platform_editor_when_unset_or_blank() {
+    #[cfg(windows)]
+    const FALLBACK: &str = "notepad";
+    #[cfg(not(windows))]
+    const FALLBACK: &str = "vi";
+    assert_eq!(editor_program(None), FALLBACK);
+    assert_eq!(editor_program(Some("")), FALLBACK);
+    assert_eq!(editor_program(Some("   ")), FALLBACK);
     assert_eq!(editor_program(Some("vim")), "vim");
     assert_eq!(editor_program(Some("code --wait")), "code --wait");
 }

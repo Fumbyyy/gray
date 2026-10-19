@@ -178,13 +178,41 @@ fn home() -> Option<PathBuf> {
     gray_core::paths::user_home()
 }
 
+#[cfg(windows)]
+fn exe_candidates(bin: &str) -> Vec<String> {
+    use std::sync::OnceLock;
+    static PATHEXT: OnceLock<Vec<String>> = OnceLock::new();
+    let exts = PATHEXT.get_or_init(|| {
+        std::env::var("PATHEXT")
+            .map(|v| {
+                v.split(';')
+                    .filter(|e| !e.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_else(|_| vec![".COM".into(), ".EXE".into(), ".BAT".into(), ".CMD".into()])
+    });
+    let mut out = vec![bin.to_string()];
+    if std::path::Path::new(bin).extension().is_none() {
+        out.extend(exts.iter().map(|e| format!("{bin}{e}")));
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn exe_candidates(bin: &str) -> Vec<String> {
+    vec![bin.to_string()]
+}
+
 fn on_path(bin: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
     };
     for dir in std::env::split_paths(&paths) {
-        if dir.join(bin).is_file() {
-            return true;
+        for name in exe_candidates(bin) {
+            if dir.join(&name).is_file() {
+                return true;
+            }
         }
     }
     false
@@ -383,3 +411,7 @@ pub(crate) fn scanned_report() -> String {
     }
     out
 }
+
+#[path = "detect_tests.rs"]
+#[cfg(test)]
+mod tests;
