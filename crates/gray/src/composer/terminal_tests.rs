@@ -245,7 +245,7 @@ fn insert(term: &mut Term, rows: &[&str]) {
 
 fn band(term: &mut Term, height: u16) {
     let screen = term.last_known_screen_size;
-    term.set_viewport_height(height, screen).unwrap();
+    term.set_viewport_height(height, 0, screen).unwrap();
     term.draw(|frame| {
         let area = frame.area();
         for i in 0..area.height {
@@ -569,7 +569,7 @@ fn a_frame_on_a_shrunken_screen_does_not_scroll_history() {
     insert(&mut term, &refs);
     band(&mut term, 4);
     let mark = tape.len();
-    term.set_viewport_height(4, Size::new(W, 8)).unwrap();
+    term.set_viewport_height(4, 0, Size::new(W, 8)).unwrap();
     assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4));
     assert!(!tape.since(mark).contains("\r\n"), "history was scrolled");
 }
@@ -601,7 +601,7 @@ fn a_popup_on_a_full_screen_regrounds_the_band() {
 fn a_busy_turn_does_not_tear_the_transcript() {
     fn band_fill(term: &mut Term, height: u16) {
         let screen = term.last_known_screen_size;
-        term.set_viewport_height(height, screen).unwrap();
+        term.set_viewport_height(height, 0, screen).unwrap();
         term.draw(|frame| {
             let area = frame.area();
             for i in 0..area.height {

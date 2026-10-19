@@ -359,16 +359,25 @@ impl Store {
         Ok(Self { path, state })
     }
 
-    pub fn append(&mut self, event: Event) {
-        self.state.apply(&event);
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            && let Ok(line) = serde_json::to_string(&event)
+    pub fn append(&mut self, event: Event) -> Result<(), String> {
+        let line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
         {
-            let _ = writeln!(file, "{line}");
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
         }
+        let mut file = opts.open(&self.path).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+        }
+        writeln!(file, "{line}").map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        self.state.apply(&event);
+        Ok(())
     }
 }
 

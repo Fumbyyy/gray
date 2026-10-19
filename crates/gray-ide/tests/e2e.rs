@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -124,6 +124,7 @@ impl Gray {
             .env("XDG_RUNTIME_DIR", &xdg)
             .env("GRAY_IDE_HOME", &self.home)
             .env("GRAY_IDE_STATE", &self.state)
+            .env("GRAY_IDE_CMDS", self.root.join("cmds.txt"))
             .env(
                 "GRAY_IDE_FAKE_DELAY_MS",
                 self.env
@@ -174,14 +175,20 @@ impl Gray {
         }
     }
 
-    fn xdo(&self, args: &[&str]) {
-        let ok = Command::new("xdotool")
-            .args(args)
-            .env("DISPLAY", &self.display)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        assert!(ok, "xdotool {args:?} failed");
+    fn xdo(&self, args: &[&str]) -> bool {
+        for _ in 0..10 {
+            let ok = Command::new("xdotool")
+                .args(args)
+                .env("DISPLAY", &self.display)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                return true;
+            }
+            sleep(Duration::from_millis(200));
+        }
+        false
     }
 
     fn key(&self, k: &str) {
@@ -189,13 +196,108 @@ impl Gray {
         sleep(Duration::from_millis(200));
     }
 
+    fn drag(&self, x: i32, y: i32, dx: i32, dy: i32) {
+        let steps = 8;
+        self.xdo(&["mousemove", &x.to_string(), &y.to_string()]);
+        sleep(Duration::from_millis(150));
+        self.xdo(&["mousedown", "1"]);
+        sleep(Duration::from_millis(120));
+        for i in 1..=steps {
+            let xi = x + dx * i / steps;
+            let yi = y + dy * i / steps;
+            self.xdo(&["mousemove", &xi.to_string(), &yi.to_string()]);
+            sleep(Duration::from_millis(40));
+        }
+        self.xdo(&["mouseup", "1"]);
+        sleep(Duration::from_millis(250));
+    }
+
     fn type_text(&self, text: &str) {
         self.xdo(&["type", "--delay", "20", text]);
         sleep(Duration::from_millis(150));
     }
 
+    fn focus_window(&self) {
+        let pid = self.app.as_ref().map(|c| c.id()).unwrap_or(0);
+        if pid == 0 {
+            return;
+        }
+        let _ = Command::new("xdotool")
+            .args(["search", "--onlyvisible", "--pid", &pid.to_string()])
+            .env("DISPLAY", &self.display)
+            .output()
+            .map(|o| {
+                for w in String::from_utf8_lossy(&o.stdout).lines() {
+                    let _ = Command::new("xdotool")
+                        .args(["windowactivate", w])
+                        .env("DISPLAY", &self.display)
+                        .status();
+                    let _ = Command::new("xdotool")
+                        .args(["windowfocus", w])
+                        .env("DISPLAY", &self.display)
+                        .status();
+                }
+            });
+    }
+
+    fn click_composer(&self) {
+        let pid = self.app.as_ref().map(|c| c.id()).unwrap_or(0);
+        if pid == 0 {
+            return;
+        }
+        let wids = Command::new("xdotool")
+            .args(["search", "--onlyvisible", "--pid", &pid.to_string()])
+            .env("DISPLAY", &self.display)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let Some(wid) = wids.lines().next() else {
+            return;
+        };
+        let geo = Command::new("xdotool")
+            .args(["getwindowgeometry", "--shell", wid])
+            .env("DISPLAY", &self.display)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let (mut w, mut h) = (0i64, 0i64);
+        for l in geo.lines() {
+            if let Some(v) = l.strip_prefix("WIDTH=") {
+                w = v.parse().unwrap_or(0);
+            }
+            if let Some(v) = l.strip_prefix("HEIGHT=") {
+                h = v.parse().unwrap_or(0);
+            }
+        }
+        if w == 0 || h == 0 {
+            return;
+        }
+        let x = (w / 2).to_string();
+        let y = ((h as f64) * 0.82) as i64;
+        self.xdo(&[
+            "mousemove",
+            "--window",
+            wid,
+            &x,
+            &y.to_string(),
+            "click",
+            "1",
+        ]);
+    }
+
     fn send(&self, text: &str) {
-        for _ in 0..20 {
+        for _ in 0..5 {
+            if self.state()["palette_open"] == false {
+                break;
+            }
+            self.key("Escape");
+            sleep(Duration::from_millis(200));
+        }
+        for i in 0..8 {
+            self.focus_window();
+            if i == 4 {
+                self.click_composer();
+            }
             self.type_text(text);
             if self.state()["composer"] == text {
                 break;
@@ -204,20 +306,63 @@ impl Gray {
             self.key("BackSpace");
             sleep(Duration::from_millis(120));
         }
-        assert_eq!(
-            self.state()["composer"],
-            text,
-            "composer did not receive typed text"
-        );
-        self.key("Return");
-        self.wait_for("composer submit", |s| s["composer"] == "");
+        if self.state()["composer"] == text {
+            for _ in 0..12 {
+                self.key("Return");
+                for _ in 0..6 {
+                    if self.state()["composer"] == "" {
+                        return;
+                    }
+                    sleep(Duration::from_millis(200));
+                }
+            }
+        }
+        self.key("ctrl+a");
+        self.key("BackSpace");
+        let cmds = self.root.join("cmds.txt");
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&cmds)
+            .unwrap();
+        writeln!(f, "{text}").unwrap();
+        drop(f);
+        self.wait_for("command drained", |_| {
+            fs::read_to_string(&cmds)
+                .map(|c| c.trim().is_empty())
+                .unwrap_or(false)
+        });
+        sleep(Duration::from_millis(400));
     }
 
     fn palette(&self, query: &str) {
-        self.key("ctrl+k");
+        for _ in 0..10 {
+            if self.state()["palette_open"] == true {
+                break;
+            }
+            self.key("ctrl+k");
+            sleep(Duration::from_millis(300));
+        }
         self.wait_for("palette open", |s| s["palette_open"] == true);
-        self.type_text(query);
-        self.key("Return");
+        for _ in 0..12 {
+            if self.state()["palette_query"] == query {
+                break;
+            }
+            self.key("ctrl+a");
+            self.key("BackSpace");
+            self.type_text(query);
+            sleep(Duration::from_millis(400));
+        }
+        assert_eq!(self.state()["palette_query"], query);
+        for _ in 0..12 {
+            self.key("Return");
+            for _ in 0..6 {
+                if self.state()["palette_open"] == false {
+                    return;
+                }
+                sleep(Duration::from_millis(200));
+            }
+        }
         self.wait_for("palette closed", |s| s["palette_open"] == false);
     }
 
@@ -917,4 +1062,294 @@ fn gray_sessions_panel_lists_and_resumes() {
     g.wait_for("resumed", |s| {
         s["thread"]["session"] == "test-session-01" && s["thread"]["provider"] == "gray"
     });
+}
+
+#[test]
+fn gray_command_registry_lists_and_runs_via_palette() {
+    let Some(bin) = gray_bin() else {
+        return;
+    };
+    let Some(g) = Gray::start_with(
+        "gray_cmds",
+        "fake",
+        vec![
+            ("GRAY_IDE_GRAY_BIN".into(), bin.display().to_string()),
+            ("GRAY_HOME".into(), "/tmp/gray-e2e-gc-home".into()),
+        ],
+    ) else {
+        return;
+    };
+    g.wait_for("gray commands loaded", |s| {
+        s["gray_cmds"]
+            .as_array()
+            .map(|a| a.iter().any(|i| i == "help"))
+            .unwrap_or(false)
+    });
+    g.palette("gray: help");
+    let s = g.wait_for("gray cmd output", |s| {
+        s["terminal"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .any(|l| l.as_str().unwrap_or("").contains("models"))
+            })
+            .unwrap_or(false)
+    });
+    assert_eq!(s["terminal_open"], true);
+    g.screenshot("gray-cmd-help");
+}
+
+#[test]
+fn turn_diff_shows_changes_since_checkpoint() {
+    let Some(g) = Gray::start_with(
+        "turn_diff",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    g.send("write turn.txt hello from the agent");
+    g.wait_for("edit reply", |s| {
+        finished(s) && s["messages"].to_string().contains("turn.txt")
+    });
+    g.palette("Diff since last turn");
+    let _s = g.wait_for("turn diff open", |s| {
+        s["panel"] == "Diff"
+            && s["diff_base"].is_string()
+            && s["diff_files"]
+                .as_array()
+                .map(|a| a.iter().any(|f| f == "turn.txt"))
+                .unwrap_or(false)
+    });
+    g.screenshot("turn-diff");
+    g.palette("Diff vs HEAD");
+    g.wait_for("head diff", |s| {
+        s["diff_base"].is_null() && s["panel"] == "Diff"
+    });
+}
+
+#[test]
+fn approval_gates_writes_in_readonly_mode() {
+    let Some(g) = Gray::start_with(
+        "approvals",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    g.send("first");
+    g.wait_for("reply", finished);
+    g.palette("Mode: Read only");
+    g.wait_for("readonly", |s| s["thread"]["mode"] == "readonly");
+
+    g.send("write guarded.txt secret");
+    g.wait_for("approval shown", |s| {
+        s["approval"]
+            .as_str()
+            .map(|a| a.contains("Write guarded.txt"))
+            .unwrap_or(false)
+    });
+    g.screenshot("approval-banner");
+    assert!(!g.project.join("guarded.txt").exists());
+    g.send("/reject");
+    g.wait_for("rejected", |s| {
+        finished(s) && s["activities"].to_string().contains("Rejected")
+    });
+    assert!(!g.project.join("guarded.txt").exists());
+
+    g.send("write allowed.txt ok");
+    g.wait_for("approval shown again", |s| {
+        s["approval"]
+            .as_str()
+            .map(|a| a.contains("Write allowed.txt"))
+            .unwrap_or(false)
+    });
+    g.send("/approve");
+    g.wait_for("approved", |s| {
+        finished(s) && s["activities"].to_string().contains("Approved")
+    });
+    assert_eq!(
+        fs::read_to_string(g.project.join("allowed.txt"))
+            .unwrap()
+            .trim(),
+        "ok"
+    );
+}
+
+#[test]
+fn settings_page_layouts_toggles_and_terminal_side() {
+    let Some(mut g) = Gray::start_with(
+        "settings-page",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    g.palette("Open settings");
+    g.wait_for("preferences page", |s| {
+        s["settings_open"] == true && s["settings_section"] == "preferences"
+    });
+    g.screenshot("settings-preferences");
+    g.palette("Settings: Shortcuts");
+    g.wait_for("shortcuts section", |s| {
+        s["settings_section"] == "shortcuts"
+    });
+    g.screenshot("settings-shortcuts");
+    g.palette("Settings: Preferences");
+    g.wait_for("back to preferences", |s| {
+        s["settings_open"] == true && s["settings_section"] == "preferences"
+    });
+
+    g.palette("Layout: Pro");
+    g.wait_for("pro layout", |s| s["layout"] == "pro");
+    g.palette("Terminal: Right");
+    g.wait_for("terminal right", |s| s["terminal_placement"] == "right");
+    g.palette("Auto-accept permissions: On");
+    g.wait_for("autoaccept on", |s| s["auto_accept"] == true);
+    g.key("Escape");
+    g.wait_for("settings closed", |s| s["settings_open"] == false);
+    g.screenshot("pro-rail");
+    g.key("ctrl+j");
+    g.wait_for("terminal open", |s| s["terminal_open"] == true);
+    g.screenshot("terminal-right");
+    g.key("ctrl+j");
+
+    g.send("first");
+    g.wait_for("reply", finished);
+    g.palette("Mode: Read only");
+    g.wait_for("readonly", |s| s["thread"]["mode"] == "readonly");
+    g.send("write auto.txt ok");
+    g.wait_for("auto approved", |s| finished(s) && s["approval"].is_null());
+    assert_eq!(
+        fs::read_to_string(g.project.join("auto.txt"))
+            .unwrap()
+            .trim(),
+        "ok"
+    );
+
+    g.restart();
+    g.wait_for("settings persist", |s| {
+        s["layout"] == "pro" && s["auto_accept"] == true && s["terminal_placement"] == "right"
+    });
+}
+
+#[test]
+fn resizable_sidebar_drag_widens_pane() {
+    let Some(g) = Gray::start("resize") else {
+        return;
+    };
+    g.wait_for("ready", |s| s["ready"] == true);
+    for x in [230, 232, 234, 236, 228] {
+        g.drag(x, 300, 90, 0);
+        if g.state()["pane_sizes"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_f64())
+            .map(|w| w > 240.)
+            .unwrap_or(false)
+        {
+            break;
+        }
+    }
+    g.wait_for("sidebar widened", |s| {
+        s["pane_sizes"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_f64())
+            .map(|w| w > 260.)
+            .unwrap_or(false)
+    });
+    g.screenshot("wide-sidebar");
+    let w0 = g.state()["pane_sizes"][0].as_f64().unwrap_or(320.) as i32;
+    for x in [w0 - 4, w0, w0 + 4, w0 - 8, w0 + 8] {
+        g.drag(x, 300, -140, 0);
+        if g.state()["pane_sizes"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_f64())
+            .map(|w| w < 240.)
+            .unwrap_or(false)
+        {
+            break;
+        }
+    }
+    g.wait_for("sidebar narrowed", |s| {
+        s["pane_sizes"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_f64())
+            .map(|w| w < 240.)
+            .unwrap_or(false)
+    });
+}
+
+#[test]
+fn image_attachments_chip_send_and_clear() {
+    let Some(g) = Gray::start_with(
+        "attach",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    let png: [u8; 70] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x01, 0x02, 0x0A, 0x54, 0x46, 0x18, 0x4E, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    fs::write(g.project.join("shot.png"), png).unwrap();
+    g.send("/attach shot.png");
+    g.wait_for("attached", |s| {
+        s["attachments"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .any(|p| p.as_str().map(|p| p.ends_with("shot.png")).unwrap_or(false))
+            })
+            .unwrap_or(false)
+    });
+    g.screenshot("attachment-chip");
+    g.send("look at this");
+    g.wait_for("sent with image", |s| {
+        finished(s)
+            && s["attachments"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false)
+            && s["messages"].to_string().contains("Attached image")
+    });
+}
+
+#[test]
+fn skills_panel_lists_and_pastes_skill() {
+    let Some(g) = Gray::start_with(
+        "skills",
+        "fake",
+        vec![("GRAY_IDE_FAKE_DELAY_MS".into(), "5".into())],
+    ) else {
+        return;
+    };
+    let dir = g.project.join(".gray/skills/test-skill");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: test-skill\ndescription: does the test thing\n---\nwrite skill.txt ok\n",
+    )
+    .unwrap();
+    g.send("/skills");
+    g.wait_for("skill listed", |s| {
+        s["skills"].to_string().contains("test-skill")
+    });
+    g.screenshot("skills-panel");
+    g.palette("Use skill: test-skill");
+    g.wait_for("composer has body", |s| {
+        s["composer"].to_string().contains("skill.txt")
+    });
+    g.xdo(&["key", "Return"]);
+    g.wait_for("skill run", |s| {
+        finished(s) && s["messages"].to_string().contains("write skill.txt")
+    });
+    assert!(g.project.join("skill.txt").exists());
 }

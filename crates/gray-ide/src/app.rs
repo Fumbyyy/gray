@@ -1,4 +1,5 @@
 use crate::git;
+use crate::graycmds;
 use crate::plugins::{self, HubEntry, Installed, PluginMsg};
 use crate::provider::{self, MODES, PROVIDERS, ProviderEvent, Turn, TurnRequest};
 use crate::sessions::{self, GraySession};
@@ -13,6 +14,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{
     ActiveTheme, Icon, IconName, Selectable, Sizable, StyledExt, Theme, ThemeMode, h_flex, v_flex,
 };
+use gpui_kit::component::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
@@ -78,6 +80,7 @@ enum Panel {
     Plugins,
     Viewer,
     Sessions,
+    Skills,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -124,7 +127,20 @@ enum Cmd {
     ToggleViewer,
     PreviewFile(String),
     ToggleSessions,
+    ToggleSkills,
+    UseSkill(String),
     ResumeSession(String),
+    DiscardChanges,
+    Gray(String),
+    TurnDiff,
+    HeadDiff,
+    Approve(bool),
+    AttachImage(String),
+    RemoveAttachment(usize),
+    SettingsSection(String),
+    SetLayout(String),
+    SetTerminalPlacement(String),
+    SetAutoAccept(bool),
 }
 
 struct ActiveTurn {
@@ -147,6 +163,7 @@ pub struct GrayApp {
     composer: Entity<TextareaState>,
     palette_input: Entity<InputState>,
     terminal_input: Entity<InputState>,
+    settings_search: Entity<InputState>,
     palette_open: bool,
     palette_mode: PaletteMode,
     palette_query: String,
@@ -157,15 +174,24 @@ pub struct GrayApp {
     panel: Option<Panel>,
     turns: HashMap<String, ActiveTurn>,
     terminal_lines: Vec<String>,
-    terminal_rx: Option<Receiver<String>>,
+    terminal_rx: Vec<Receiver<String>>,
     scroll: ScrollHandle,
     expanded: HashSet<String>,
     tree: Vec<FileEntry>,
     tabs: Vec<Tab>,
     viewer: Option<(String, Entity<EditorState>)>,
     gray_sessions: Vec<GraySession>,
+    gray_cmds: Vec<(String, String)>,
+    pending_approval: Option<(String, String)>,
+    attachments: Vec<PathBuf>,
+    skills: Vec<crate::skills::Skill>,
+    settings_section: String,
+    settings_query: String,
+    pane_sizes: Vec<f32>,
+    gray_cmd_rx: Receiver<Vec<(String, String)>>,
     active_tab: Option<usize>,
     diff: Option<Entity<DiffState>>,
+    diff_base: Option<String>,
     diff_files: Vec<String>,
     branch: Option<String>,
     branches: Vec<String>,
@@ -174,6 +200,8 @@ pub struct GrayApp {
     last_snapshot: String,
     _subs: Vec<Subscription>,
     ticks: u64,
+    window_handle: Option<gpui::AnyWindowHandle>,
+    pending_cmds: Vec<String>,
     hub: Vec<HubEntry>,
     hub_error: Option<String>,
     installed: Vec<Installed>,
@@ -199,6 +227,9 @@ impl GrayApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("Type a command or search"));
         let terminal_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Run a shell command"));
+        let settings_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+
         let mut subs = Vec::new();
         subs.push(
             cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| {
@@ -224,6 +255,14 @@ impl GrayApp {
             },
         ));
         subs.push(cx.subscribe_in(
+            &settings_search,
+            window,
+            |this, state, _ev: &InputEvent, _window, cx| {
+                this.settings_query = state.read(cx).value().to_string();
+                cx.notify();
+            },
+        ));
+        subs.push(cx.subscribe_in(
             &terminal_input,
             window,
             |this, state, ev: &InputEvent, window, cx| {
@@ -235,6 +274,10 @@ impl GrayApp {
             },
         ));
         let (plugin_tx, plugin_rx) = channel();
+        let (gray_cmd_tx, gray_cmd_rx) = channel::<Vec<(String, String)>>();
+        std::thread::spawn(move || {
+            let _ = gray_cmd_tx.send(graycmds::list());
+        });
         let mut app = Self {
             focus: cx.focus_handle(),
             store,
@@ -243,6 +286,7 @@ impl GrayApp {
             composer,
             palette_input,
             terminal_input,
+            settings_search,
             palette_open: false,
             palette_mode: PaletteMode::Commands,
             palette_query: String::new(),
@@ -253,15 +297,26 @@ impl GrayApp {
             panel: None,
             turns: HashMap::new(),
             terminal_lines: Vec::new(),
-            terminal_rx: None,
+            terminal_rx: Vec::new(),
             scroll: ScrollHandle::new(),
             expanded: HashSet::new(),
             tree: Vec::new(),
             tabs: Vec::new(),
             viewer: None,
             gray_sessions: Vec::new(),
+            gray_cmds: Vec::new(),
+            pending_approval: None,
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            settings_section: "preferences".into(),
+            settings_query: String::new(),
+            pane_sizes: Vec::new(),
+            gray_cmd_rx,
+            window_handle: None,
+            pending_cmds: Vec::new(),
             active_tab: None,
             diff: None,
+            diff_base: None,
             diff_files: Vec::new(),
             branch: None,
             branches: Vec::new(),
@@ -299,6 +354,7 @@ impl GrayApp {
         Theme::change(mode, Some(window), cx);
         apply_brand(cx);
         app.refresh_workspace(cx);
+        app.window_handle = Some(window.window_handle());
         app.composer.update(cx, |s, cx| s.focus(window, cx));
         cx.spawn(async move |this, cx| {
             loop {
@@ -345,7 +401,7 @@ impl GrayApp {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| p.clone());
-        self.store.append(Event::ProjectAdded {
+        self.persist(Event::ProjectAdded {
             id: id.clone(),
             name,
             path: p,
@@ -368,9 +424,15 @@ impl GrayApp {
         if git::is_repo(&root) {
             self.branch = git::branch(&root);
             self.branches = git::branches(&root);
-            let text = git::diff(&root);
+            let text = match &self.diff_base {
+                Some(base) => git::diff_since(&root, base),
+                None => git::diff(&root),
+            };
             let files = DiffFile::parse(&text).unwrap_or_default();
-            self.diff_files = git::status(&root).into_iter().map(|(_, p)| p).collect();
+            self.diff_files = match &self.diff_base {
+                Some(base) => git::files_since(&root, base),
+                None => git::status(&root).into_iter().map(|(_, p)| p).collect(),
+            };
             self.diff = if files.is_empty() {
                 None
             } else {
@@ -395,6 +457,11 @@ impl GrayApp {
             provider::default_model(&provider),
         );
         let mode = self.store.state.setting("default_mode", "full");
+        let mode = if provider == "gray" {
+            "full".to_string()
+        } else {
+            mode
+        };
         (provider, model, mode)
     }
 
@@ -402,7 +469,7 @@ impl GrayApp {
         let pid = self.active_project.clone()?;
         let (provider, model, mode) = self.defaults();
         let id = new_id();
-        self.store.append(Event::ThreadCreated {
+        self.persist(Event::ThreadCreated {
             id: id.clone(),
             project_id: pid,
             title: "New thread".into(),
@@ -450,7 +517,7 @@ impl GrayApp {
         let Some(thread) = thread else { return };
         if thread.title == "New thread" {
             let title: String = text.lines().next().unwrap_or("").chars().take(48).collect();
-            self.store.append(Event::ThreadRenamed {
+            self.persist(Event::ThreadRenamed {
                 id: tid.clone(),
                 title,
             });
@@ -458,7 +525,7 @@ impl GrayApp {
         if git::is_repo(&root)
             && let Some(tree) = git::checkpoint(&root)
         {
-            self.store.append(Event::ActivityAdded {
+            self.persist(Event::ActivityAdded {
                 thread_id: tid.clone(),
                 id: new_id(),
                 kind: "checkpoint".into(),
@@ -467,18 +534,26 @@ impl GrayApp {
                 at: now(),
             });
         }
-        self.store.append(Event::MessageAdded {
+        self.persist(Event::MessageAdded {
             thread_id: tid.clone(),
             id: new_id(),
             role: Role::User,
             text: text.clone(),
             at: now(),
         });
-        let prompt = expand_mentions(&text, &root);
+        let mut prompt = expand_mentions(&text, &root);
+        for a in &self.attachments {
+            prompt.push_str(&format!("\n[Attached image: {}]", a.display()));
+        }
+        self.attachments.clear();
         let turn = provider::start(TurnRequest {
             provider: thread.provider.clone(),
             model: thread.model.clone(),
-            mode: thread.mode.clone(),
+            mode: if thread.provider == "gray" {
+                "full".to_string()
+            } else {
+                thread.mode.clone()
+            },
             prompt,
             cwd: root,
             effort: thread.effort.clone(),
@@ -513,12 +588,19 @@ impl GrayApp {
             "checkout" => Cmd::Branch(arg),
             "diff" => Cmd::ToggleDiff,
             "terminal" => Cmd::ToggleTerminal,
-            "settings" => Cmd::Settings,
+            "settings" => {
+                if arg.is_empty() {
+                    Cmd::Settings
+                } else {
+                    Cmd::SettingsSection(arg.to_lowercase())
+                }
+            }
             "theme" => Cmd::ToggleTheme,
             "pin" => Cmd::Pin,
             "archive" => Cmd::Archive,
             "checkpoint" => Cmd::Checkpoint,
             "restore" => Cmd::Restore,
+            "discard" => Cmd::DiscardChanges,
             "stop" => Cmd::Stop,
             "settle" => Cmd::Settle,
             "plugins" => Cmd::TogglePlugins,
@@ -532,7 +614,16 @@ impl GrayApp {
             "background" | "bg" => Cmd::SetBackground(arg),
             "view" | "preview" => Cmd::PreviewFile(arg),
             "sessions" => Cmd::ToggleSessions,
+            "skills" => Cmd::ToggleSkills,
             "resume" => Cmd::ResumeSession(arg),
+            "gray" => Cmd::Gray(arg),
+            "approve" => Cmd::Approve(true),
+            "layout" => Cmd::SetLayout(arg),
+            "attach" | "image" => Cmd::AttachImage(arg),
+            "autoaccept" => Cmd::SetAutoAccept(matches!(arg.as_str(), "on" | "true" | "1")),
+            "reject" => Cmd::Approve(false),
+            "turndiff" | "changes" => Cmd::TurnDiff,
+            "headdiff" => Cmd::HeadDiff,
             _ => {
                 self.toast(format!("Unknown command /{name}"), true);
                 cx.notify();
@@ -544,10 +635,23 @@ impl GrayApp {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         self.ticks += 1;
+        if let Some(path) = std::env::var_os("GRAY_IDE_CMDS")
+            && let Ok(text) = std::fs::read_to_string(&path)
+            && !text.trim().is_empty()
+        {
+            let _ = std::fs::write(&path, "");
+            self.pending_cmds.extend(
+                text.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty()),
+            );
+            cx.notify();
+        }
         let mut changed = false;
         let mut finished: Vec<(String, Result<(), String>)> = Vec::new();
         let mut activities: Vec<(String, String, String, String)> = Vec::new();
         let mut sessions: Vec<(String, String)> = Vec::new();
+        let mut approvals: Vec<(String, String)> = Vec::new();
         for (tid, active) in self.turns.iter_mut() {
             loop {
                 match active.turn.rx.try_recv() {
@@ -568,6 +672,10 @@ impl GrayApp {
                         changed = true;
                     }
                     Ok(ProviderEvent::Session(sid)) => sessions.push((tid.clone(), sid)),
+                    Ok(ProviderEvent::Approval { label }) => {
+                        approvals.push((tid.clone(), label));
+                        changed = true;
+                    }
                     Ok(ProviderEvent::Done) => {
                         finished.push((tid.clone(), Ok(())));
                         break;
@@ -584,6 +692,27 @@ impl GrayApp {
                 }
             }
         }
+        for (tid, label) in approvals {
+            let auto = self.store.state.setting("auto_accept", "false") == "true";
+            if auto {
+                if let Some(t) = self.turns.get(&tid)
+                    && let Ok(mut p) = t.turn.pending.lock()
+                    && let Some(tx) = p.take()
+                {
+                    let _ = tx.send(true);
+                }
+                self.persist(Event::ActivityAdded {
+                    thread_id: tid,
+                    id: new_id(),
+                    kind: "approval".into(),
+                    label: "Auto-approved".into(),
+                    detail: label,
+                    at: now(),
+                });
+            } else {
+                self.pending_approval = Some((tid, label));
+            }
+        }
         for (tid, sid) in sessions {
             let provider = self.store.state.thread(&tid).map(|t| t.provider.clone());
             let known = self
@@ -594,7 +723,7 @@ impl GrayApp {
                 .map(|(p, s)| Some(p) == provider.as_ref() && s == &sid)
                 .unwrap_or(false);
             if let (Some(provider), false) = (provider, known) {
-                self.store.append(Event::ThreadSession {
+                self.persist(Event::ThreadSession {
                     id: tid,
                     provider,
                     session: sid,
@@ -602,7 +731,7 @@ impl GrayApp {
             }
         }
         for (tid, kind, label, detail) in activities {
-            self.store.append(Event::ActivityAdded {
+            self.persist(Event::ActivityAdded {
                 thread_id: tid,
                 id: new_id(),
                 kind,
@@ -615,7 +744,7 @@ impl GrayApp {
             changed = true;
             let text = self.turns.remove(&tid).map(|a| a.text).unwrap_or_default();
             if !text.trim().is_empty() {
-                self.store.append(Event::MessageAdded {
+                self.persist(Event::MessageAdded {
                     thread_id: tid.clone(),
                     id: new_id(),
                     role: Role::Assistant,
@@ -626,7 +755,7 @@ impl GrayApp {
             let status = match result {
                 Ok(()) => "completed".to_string(),
                 Err(e) => {
-                    self.store.append(Event::ActivityAdded {
+                    self.persist(Event::ActivityAdded {
                         thread_id: tid.clone(),
                         id: new_id(),
                         kind: "error".into(),
@@ -641,12 +770,16 @@ impl GrayApp {
                     "error".to_string()
                 }
             };
-            self.store.append(Event::TurnFinished {
+            self.persist(Event::TurnFinished {
                 thread_id: tid,
                 status,
                 at: now(),
             });
             self.refresh_workspace(cx);
+        }
+        while let Ok(cmds) = self.gray_cmd_rx.try_recv() {
+            changed = true;
+            self.gray_cmds = cmds;
         }
         while let Ok(msg) = self.plugin_rx.try_recv() {
             changed = true;
@@ -666,20 +799,29 @@ impl GrayApp {
                 }
             }
         }
-        if let Some(rx) = &self.terminal_rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(line) => {
-                        self.terminal_lines.push(line);
-                        changed = true;
+        if !self.terminal_rx.is_empty() {
+            let mut i = 0;
+            while i < self.terminal_rx.len() {
+                let mut closed = false;
+                loop {
+                    match self.terminal_rx[i].try_recv() {
+                        Ok(line) => {
+                            self.terminal_lines.push(line);
+                            changed = true;
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            closed = true;
+                            break;
+                        }
                     }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        self.terminal_rx = None;
-                        self.refresh_workspace(cx);
-                        changed = true;
-                        break;
-                    }
+                }
+                if closed {
+                    self.terminal_rx.remove(i);
+                    self.refresh_workspace(cx);
+                    changed = true;
+                } else {
+                    i += 1;
                 }
             }
             if self.terminal_lines.len() > 2000 {
@@ -707,7 +849,7 @@ impl GrayApp {
             return;
         };
         self.terminal_lines.push(format!("$ {cmd}"));
-        self.terminal_rx = Some(workspace::run_shell(&root, &cmd));
+        self.terminal_rx.push(workspace::run_shell(&root, &cmd));
         cx.notify();
     }
 
@@ -719,6 +861,7 @@ impl GrayApp {
         cx: &mut Context<Self>,
     ) {
         self.palette_open = true;
+        self.settings_open = false;
         self.palette_mode = mode;
         self.palette_query = query.to_string();
         let q = query.to_string();
@@ -763,6 +906,14 @@ impl GrayApp {
         items.push((k("Create checkpoint"), k("Git"), Cmd::Checkpoint));
         items.push((k("Plugins"), k("Ctrl+Shift+P"), Cmd::TogglePlugins));
         items.push((k("Sessions"), k("Gray"), Cmd::ToggleSessions));
+        items.push((k("Skills"), k("Gray"), Cmd::ToggleSkills));
+        for sk in &self.skills {
+            items.push((
+                format!("Use skill: {}", sk.name),
+                sk.source.clone(),
+                Cmd::UseSkill(sk.name.clone()),
+            ));
+        }
         for gs in self.gray_sessions.iter().take(10) {
             items.push((
                 format!("Resume session: {}", gs.id),
@@ -782,6 +933,28 @@ impl GrayApp {
                 Cmd::SetBackground(b.0.into()),
             ));
         }
+        if let Some(root) = self.work_root() {
+            for f in workspace::all_files(&root, 5000) {
+                let ext = f.rsplit('.').next().unwrap_or("").to_lowercase();
+                if !matches!(
+                    ext.as_str(),
+                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+                ) {
+                    continue;
+                }
+                items.push((
+                    format!("Attach: {f}"),
+                    k("Image"),
+                    Cmd::AttachImage(f.clone()),
+                ));
+                if items.len() > 80 {
+                    break;
+                }
+            }
+        }
+        for (n, d) in &self.gray_cmds {
+            items.push((format!("gray: {n}"), d.clone(), Cmd::Gray(n.clone())));
+        }
         for h in &self.hub {
             items.push((
                 format!("Install plugin: {}", h.name),
@@ -800,6 +973,43 @@ impl GrayApp {
             ));
         }
         items.push((k("Restore last checkpoint"), k("Git"), Cmd::Restore));
+        items.push((k("Diff since last turn"), k("Git"), Cmd::TurnDiff));
+        for sec in ["Preferences", "Appearance", "Shortcuts", "About"] {
+            items.push((
+                format!("Settings: {sec}"),
+                k("Settings"),
+                Cmd::SettingsSection(sec.to_lowercase()),
+            ));
+        }
+        for (id, label) in [("focus", "Focus"), ("pro", "Pro")] {
+            items.push((
+                format!("Layout: {label}"),
+                k("Layout"),
+                Cmd::SetLayout(id.into()),
+            ));
+        }
+        for (id, label) in [("bottom", "Bottom"), ("right", "Right")] {
+            items.push((
+                format!("Terminal: {label}"),
+                k("Layout"),
+                Cmd::SetTerminalPlacement(id.into()),
+            ));
+        }
+        items.push((
+            k("Auto-accept permissions: On"),
+            k("Settings"),
+            Cmd::SetAutoAccept(true),
+        ));
+        items.push((
+            k("Auto-accept permissions: Off"),
+            k("Settings"),
+            Cmd::SetAutoAccept(false),
+        ));
+        if self.pending_approval.is_some() {
+            items.push((k("Approve pending action"), k("Action"), Cmd::Approve(true)));
+            items.push((k("Reject pending action"), k("Action"), Cmd::Approve(false)));
+        }
+        items.push((k("Diff vs HEAD"), k("Git"), Cmd::HeadDiff));
         items.push((
             k(if self.show_archived {
                 "Hide archived threads"
@@ -829,7 +1039,15 @@ impl GrayApp {
                 ));
             }
         }
+        let active_provider = self
+            .active_thread
+            .as_ref()
+            .and_then(|id| self.store.state.thread(id))
+            .map(|t| t.provider.clone());
         for (id, label) in MODES {
+            if active_provider.as_deref() == Some("gray") && *id != "full" {
+                continue;
+            }
             items.push((
                 format!("Mode: {label}"),
                 k("Access"),
@@ -907,22 +1125,35 @@ impl GrayApp {
         out
     }
 
+    fn persist(&mut self, e: Event) {
+        if let Err(err) = self.store.append(e) {
+            self.toast(format!("Couldn't save: {err}"), true);
+        }
+    }
+
+    fn dirty_tabs(&self, cx: &App) -> usize {
+        self.tabs
+            .iter()
+            .filter(|t| t.editor.read(cx).value() != t.saved)
+            .count()
+    }
+
     fn configure(&mut self, provider: Option<String>, model: Option<String>, mode: Option<String>) {
         let Some(tid) = self.active_thread.clone() else {
             if let Some(p) = &provider {
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: "default_provider".into(),
                     value: p.clone(),
                 });
             }
             if let (Some(p), Some(m)) = (&provider, &model) {
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: format!("default_model.{p}"),
                     value: m.clone(),
                 });
             }
             if let Some(m) = &mode {
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: "default_mode".into(),
                     value: m.clone(),
                 });
@@ -933,6 +1164,13 @@ impl GrayApp {
             return;
         };
         let provider_id = provider.clone().unwrap_or(t.provider.clone());
+        let mode = mode.or(Some(t.mode.clone())).map(|m| {
+            if provider_id == "gray" {
+                "full".to_string()
+            } else {
+                m
+            }
+        });
         let model = model.unwrap_or_else(|| {
             if provider.is_some() && provider_id != t.provider {
                 provider::default_model(&provider_id).to_string()
@@ -940,11 +1178,11 @@ impl GrayApp {
                 t.model.clone()
             }
         });
-        self.store.append(Event::ThreadConfigured {
+        self.persist(Event::ThreadConfigured {
             id: tid,
             provider: provider_id,
             model,
-            mode: mode.unwrap_or(t.mode),
+            mode: mode.unwrap_or_default(),
         });
     }
 
@@ -974,7 +1212,10 @@ impl GrayApp {
                 };
                 self.refresh_workspace(cx);
             }
-            Cmd::Settings => self.settings_open = true,
+            Cmd::Settings => {
+                self.settings_open = true;
+                self.composer.update(cx, |s, cx| s.focus(window, cx));
+            }
             Cmd::ToggleTheme => {
                 let dark = cx.theme().mode.is_dark();
                 let next = if dark {
@@ -982,7 +1223,7 @@ impl GrayApp {
                 } else {
                     ThemeMode::Dark
                 };
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: "theme".into(),
                     value: next.name().into(),
                 });
@@ -1009,6 +1250,119 @@ impl GrayApp {
                 if MODES.iter().any(|x| x.0 == m) {
                     self.configure(None, None, Some(m));
                 }
+            }
+            Cmd::TurnDiff => {
+                let tree = self
+                    .active_thread
+                    .as_ref()
+                    .and_then(|t| self.store.state.thread(t))
+                    .and_then(|t| {
+                        t.items.iter().rev().find_map(|i| match i {
+                            Item::Activity { kind, detail, .. } if kind == "checkpoint" => {
+                                Some(detail.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+                match tree {
+                    Some(tree) => {
+                        self.diff_base = Some(tree);
+                        self.panel = Some(Panel::Diff);
+                        self.refresh_workspace(cx);
+                    }
+                    None => {
+                        self.toast("No checkpoint in this thread", true);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            Cmd::HeadDiff => {
+                self.diff_base = None;
+                self.panel = Some(Panel::Diff);
+                self.refresh_workspace(cx);
+            }
+            Cmd::SettingsSection(section) => {
+                self.settings_open = true;
+                self.settings_section = section;
+                self.composer.update(cx, |s, cx| s.focus(window, cx));
+            }
+            Cmd::SetLayout(v) => {
+                self.persist(Event::SettingChanged {
+                    key: "layout".into(),
+                    value: v,
+                });
+            }
+            Cmd::SetTerminalPlacement(v) => {
+                self.persist(Event::SettingChanged {
+                    key: "terminal_placement".into(),
+                    value: v,
+                });
+            }
+            Cmd::SetAutoAccept(b) => {
+                self.persist(Event::SettingChanged {
+                    key: "auto_accept".into(),
+                    value: if b { "true" } else { "false" }.into(),
+                });
+            }
+            Cmd::AttachImage(arg) => {
+                let rel = PathBuf::from(arg.trim());
+                let path = if rel.is_absolute() {
+                    rel
+                } else {
+                    match self.work_root() {
+                        Some(r) => r.join(rel),
+                        None => rel,
+                    }
+                };
+                if path.is_file() {
+                    if !self.attachments.contains(&path) {
+                        self.attachments.push(path);
+                    }
+                } else {
+                    self.toast(format!("No image at {}", path.display()), true);
+                }
+            }
+            Cmd::RemoveAttachment(i) => {
+                if i < self.attachments.len() {
+                    self.attachments.remove(i);
+                }
+            }
+            Cmd::Approve(ok) => {
+                if let Some((tid, label)) = self.pending_approval.take() {
+                    if let Some(t) = self.turns.get(&tid)
+                        && let Ok(mut p) = t.turn.pending.lock()
+                        && let Some(tx) = p.take()
+                    {
+                        let _ = tx.send(ok);
+                    }
+                    self.persist(Event::ActivityAdded {
+                        thread_id: tid,
+                        id: new_id(),
+                        kind: "approval".into(),
+                        label: if ok { "Approved" } else { "Rejected" }.into(),
+                        detail: label,
+                        at: now(),
+                    });
+                }
+            }
+            Cmd::Gray(name) => {
+                self.terminal_open = true;
+                self.run_terminal(format!("{} cmd run {name}", graycmds::bin()), cx);
+            }
+            Cmd::DiscardChanges => {
+                let before = self.tabs.len();
+                self.tabs.retain(|t| t.editor.read(cx).value() == t.saved);
+                let dropped = before - self.tabs.len();
+                self.active_tab = self.active_tab.filter(|i| *i < self.tabs.len());
+                self.toast(
+                    if dropped > 0 {
+                        format!("Discarded edits in {dropped} file(s)")
+                    } else {
+                        "Nothing to discard".into()
+                    },
+                    dropped == 0,
+                );
             }
             Cmd::Branch(b) | Cmd::NewBranch(b) if b.is_empty() => {
                 self.toast("Branch name required", true)
@@ -1038,7 +1392,7 @@ impl GrayApp {
                     .and_then(|t| self.store.state.thread(t))
                     .cloned()
                 {
-                    self.store.append(Event::ThreadPinned {
+                    self.persist(Event::ThreadPinned {
                         id: t.id,
                         pinned: !t.pinned,
                     });
@@ -1051,7 +1405,7 @@ impl GrayApp {
                     .and_then(|t| self.store.state.thread(t))
                     .cloned()
                 {
-                    self.store.append(Event::ThreadArchived {
+                    self.persist(Event::ThreadArchived {
                         id: t.id,
                         archived: !t.archived,
                     });
@@ -1065,14 +1419,14 @@ impl GrayApp {
                     if let Some(t) = self.turns.remove(&id) {
                         t.turn.cancel();
                     }
-                    self.store.append(Event::ThreadDeleted { id });
+                    self.persist(Event::ThreadDeleted { id });
                 }
             }
             Cmd::Rename(title) => {
                 if let Some(id) = self.active_thread.clone()
                     && !title.is_empty()
                 {
-                    self.store.append(Event::ThreadRenamed { id, title });
+                    self.persist(Event::ThreadRenamed { id, title });
                 }
             }
             Cmd::OpenFile(path) => self.open_file(&path, window, cx),
@@ -1080,7 +1434,7 @@ impl GrayApp {
                 if let (Some(root), Some(tid)) = (self.work_root(), self.active_thread.clone())
                     && let Some(tree) = git::checkpoint(&root)
                 {
-                    self.store.append(Event::ActivityAdded {
+                    self.persist(Event::ActivityAdded {
                         thread_id: tid,
                         id: new_id(),
                         kind: "checkpoint".into(),
@@ -1092,6 +1446,10 @@ impl GrayApp {
                 }
             }
             Cmd::Restore => {
+                if self.dirty_tabs(cx) > 0 {
+                    self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                    return;
+                }
                 let tree = self
                     .active_thread
                     .as_ref()
@@ -1120,16 +1478,30 @@ impl GrayApp {
                 if let Some(tid) = &self.active_thread
                     && let Some(t) = self.turns.get(tid)
                 {
+                    if let Ok(mut p) = t.turn.pending.lock()
+                        && let Some(tx) = p.take()
+                    {
+                        let _ = tx.send(false);
+                    }
+                    self.pending_approval = None;
                     t.turn.cancel();
                 }
             }
             Cmd::AddProject(p) => {
+                if self.dirty_tabs(cx) > 0 {
+                    self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                    return;
+                }
                 self.add_project(Path::new(&p));
                 self.tabs.clear();
                 self.active_tab = None;
                 self.refresh_workspace(cx);
             }
             Cmd::Project(id) => {
+                if self.dirty_tabs(cx) > 0 {
+                    self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                    return;
+                }
                 self.active_project = Some(id.clone());
                 self.active_thread = self
                     .store
@@ -1142,6 +1514,10 @@ impl GrayApp {
                 self.refresh_workspace(cx);
             }
             Cmd::Thread(id) => {
+                if self.dirty_tabs(cx) > 0 {
+                    self.toast("Unsaved files — save (Ctrl+S) or /discard first", true);
+                    return;
+                }
                 self.active_thread = Some(id);
                 self.tabs.clear();
                 self.active_tab = None;
@@ -1194,7 +1570,7 @@ impl GrayApp {
                     .and_then(|t| self.store.state.thread(t))
                     .cloned()
                 {
-                    self.store.append(Event::ThreadSettled {
+                    self.persist(Event::ThreadSettled {
                         id: t.id,
                         settled: !t.settled,
                     });
@@ -1207,7 +1583,7 @@ impl GrayApp {
                     } else {
                         now() + minutes * 60_000
                     };
-                    self.store.append(Event::ThreadSnoozed { id, until });
+                    self.persist(Event::ThreadSnoozed { id, until });
                 }
             }
             Cmd::ToggleViewer => {
@@ -1222,6 +1598,31 @@ impl GrayApp {
                     self.toast("Usage: /view <file>", true);
                 } else {
                     self.preview_file(&rel, window, cx);
+                }
+            }
+            Cmd::ToggleSkills => {
+                self.panel = if self.panel == Some(Panel::Skills) {
+                    None
+                } else {
+                    Some(Panel::Skills)
+                };
+                if self.panel == Some(Panel::Skills) {
+                    let agent_dir = crate::data_dir()
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(crate::data_dir);
+                    self.skills = crate::skills::discover(self.work_root().as_deref(), &agent_dir);
+                }
+            }
+            Cmd::UseSkill(name) => {
+                if let Some(sk) = self.skills.iter().find(|sk| sk.name == *name) {
+                    let text = if sk.body.is_empty() {
+                        format!("Use the {} skill.", sk.name)
+                    } else {
+                        sk.body.clone()
+                    };
+                    self.composer
+                        .update(cx, |s, cx| s.set_value(text, window, cx));
                 }
             }
             Cmd::ToggleSessions => {
@@ -1240,25 +1641,25 @@ impl GrayApp {
                     .store
                     .state
                     .setting("default_model.gray", provider::default_model("gray"));
-                self.store.append(Event::ThreadConfigured {
+                self.persist(Event::ThreadConfigured {
                     id: tid.clone(),
                     provider: "gray".into(),
                     model,
                     mode: "full".into(),
                 });
-                self.store.append(Event::ThreadSession {
+                self.persist(Event::ThreadSession {
                     id: tid.clone(),
                     provider: "gray".into(),
                     session: id.clone(),
                 });
-                self.store.append(Event::ThreadRenamed {
+                self.persist(Event::ThreadRenamed {
                     id: tid,
                     title: format!("gray/{id}"),
                 });
                 self.toast(format!("Resuming {id}"), false);
             }
             Cmd::SetBackground(b) => {
-                self.store.append(Event::SettingChanged {
+                self.persist(Event::SettingChanged {
                     key: "background".into(),
                     value: b.clone(),
                 });
@@ -1274,7 +1675,7 @@ impl GrayApp {
             Cmd::Effort(e) => {
                 if ["low", "medium", "high"].contains(&e.as_str()) {
                     if let Some(id) = self.active_thread.clone() {
-                        self.store.append(Event::ThreadEffort { id, effort: e });
+                        self.persist(Event::ThreadEffort { id, effort: e });
                     }
                 } else {
                     self.toast("Effort must be low, medium or high", true);
@@ -1299,9 +1700,15 @@ impl GrayApp {
                         .join(format!("{base}-worktrees"))
                         .join(&name);
                     match git::worktree_add(&root, &dir, &name) {
+                        Ok(()) if self.dirty_tabs(cx) > 0 => {
+                            self.toast(
+                                format!("Worktree {name} created; save or /discard to switch"),
+                                false,
+                            );
+                        }
                         Ok(()) => {
                             if let Some(id) = tid {
-                                self.store.append(Event::ThreadWorktree {
+                                self.persist(Event::ThreadWorktree {
                                     id,
                                     path: dir.display().to_string(),
                                 });
@@ -1334,7 +1741,14 @@ impl GrayApp {
         let Some(root) = self.work_root() else {
             return;
         };
-        let content = std::fs::read_to_string(root.join(rel)).unwrap_or_default();
+        let content = match std::fs::read_to_string(root.join(rel)) {
+            Ok(c) => c,
+            Err(e) => {
+                self.toast(format!("Can't open {rel}: {e}"), true);
+                cx.notify();
+                return;
+            }
+        };
         let lang = workspace::language_for(rel);
         let value = content.clone();
         let editor = cx.new(|cx| {
@@ -1364,7 +1778,14 @@ impl GrayApp {
             cx.notify();
             return;
         }
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.toast(format!("Can't preview {rel}: {e}"), true);
+                cx.notify();
+                return;
+            }
+        };
         let lang = workspace::language_for(rel);
         match &self.viewer {
             Some((p, st)) if p == rel => {
@@ -1390,10 +1811,11 @@ impl GrayApp {
             return;
         };
         for tab in &mut self.tabs {
-            let content = std::fs::read_to_string(root.join(&tab.path)).unwrap_or_default();
-            let v = content.clone();
-            tab.editor.update(cx, |s, cx| s.set_value(v, window, cx));
-            tab.saved = content;
+            if let Ok(content) = std::fs::read_to_string(root.join(&tab.path)) {
+                let v = content.clone();
+                tab.editor.update(cx, |s, cx| s.set_value(v, window, cx));
+                tab.saved = content;
+            }
         }
     }
 
@@ -1474,6 +1896,11 @@ impl GrayApp {
             "theme": cx.theme().mode.name(),
             "background": self.store.state.setting("background", "none"),
             "viewer": self.viewer.as_ref().map(|(p, _)| p.clone()),
+            "gray_cmds": self
+                .gray_cmds
+                .iter()
+                .map(|c| c.0.clone())
+                .collect::<Vec<_>>(),
             "gray_sessions": self.gray_sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
             "project": self.active_project.as_ref().and_then(|p| self.store.state.project(p)).map(|p| serde_json::json!({"name": p.name, "path": p.path})),
             "projects": self.store.state.projects.len(),
@@ -1490,6 +1917,15 @@ impl GrayApp {
             "active_tab": self.active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.path.clone()),
             "editor_text": self.active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.editor.read(cx).value().to_string()),
             "diff_files": self.diff_files,
+            "diff_base": self.diff_base,
+            "approval": self.pending_approval.as_ref().map(|(_, l)| l.clone()),
+            "settings_section": self.settings_section,
+            "layout": self.store.state.setting("layout", "focus"),
+            "auto_accept": self.store.state.setting("auto_accept", "false") == "true",
+            "terminal_placement": self.store.state.setting("terminal_placement", "bottom"),
+            "pane_sizes": self.pane_sizes,
+            "attachments": self.attachments.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "skills": self.skills.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
             "terminal": self.terminal_lines.iter().rev().take(40).rev().cloned().collect::<Vec<_>>(),
             "composer": self.composer.read(cx).value().to_string(),
             "toast": self.toast.as_ref().map(|t| t.0.clone()),
@@ -1502,6 +1938,11 @@ impl GrayApp {
         if s != self.last_snapshot {
             let tmp = path.with_extension("tmp");
             if std::fs::write(&tmp, &s).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                }
                 let _ = std::fs::rename(&tmp, &path);
             }
             self.last_snapshot = s;
@@ -2218,6 +2659,52 @@ impl GrayApp {
             .into_any_element()
     }
 
+    fn render_approval(&self, label: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        div()
+            .w_full()
+            .max_w(px(820.))
+            .mx_auto()
+            .px_6()
+            .pb_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(t.warning)
+                    .bg(t.warning.opacity(0.08))
+                    .px_3()
+                    .py_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(t.warning)
+                            .child(format!("Approve? {label}")),
+                    )
+                    .child(
+                        Button::new("approve")
+                            .primary()
+                            .small()
+                            .label("Approve")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run(Cmd::Approve(true), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("reject")
+                            .ghost()
+                            .small()
+                            .label("Reject")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run(Cmd::Approve(false), window, cx)
+                            })),
+                    ),
+            )
+    }
+
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let thread = self
@@ -2247,6 +2734,62 @@ impl GrayApp {
                     .border_color(t.border)
                     .bg(t.popover)
                     .shadow_sm()
+                    .children(
+                        self.attachments
+                            .iter()
+                            .enumerate()
+                            .map(|(i, path)| {
+                                h_flex()
+                                    .id(SharedString::from(format!("attachment-{i}")))
+                                    .px_2()
+                                    .pt_2()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .w(px(44.))
+                                            .h(px(44.))
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(t.border)
+                                            .overflow_hidden()
+                                            .child(
+                                                img(path.clone())
+                                                    .w(px(44.))
+                                                    .h(px(44.))
+                                                    .object_fit(ObjectFit::Cover),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(t.muted_foreground)
+                                            .child(
+                                                path.file_name()
+                                                    .map(|n| n.to_string_lossy().to_string())
+                                                    .unwrap_or_default(),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "attach-remove-{i}"
+                                        )))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Close)
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.run(Cmd::RemoveAttachment(i), window, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>(),
+                    )
                     .child(
                         div()
                             .px_2()
@@ -2335,18 +2878,176 @@ impl GrayApp {
             )
     }
 
-    fn render_terminal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let mut icons = v_flex()
+            .id("rail-scroll")
+            .flex_1()
+            .overflow_y_scroll()
+            .p_2()
+            .gap_2()
+            .items_center();
+        for p in &self.store.state.projects {
+            let pid = p.id.clone();
+            let active = Some(&p.id) == self.active_project.as_ref();
+            icons = icons.child(
+                Button::new(SharedString::from(format!("rail-project-{}", p.id)))
+                    .ghost()
+                    .small()
+                    .icon(if active {
+                        IconName::FolderOpen
+                    } else {
+                        IconName::Folder
+                    })
+                    .tooltip(p.name.clone())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run(Cmd::Project(pid.clone()), window, cx)
+                    })),
+            );
+            if active {
+                let threads: Vec<_> = self
+                    .store
+                    .state
+                    .threads_for(&p.id, self.show_archived)
+                    .into_iter()
+                    .filter(|t| self.show_archived || t.snoozed_until <= now())
+                    .collect();
+                for th in threads {
+                    let id = th.id.clone();
+                    let sel = Some(&th.id) == self.active_thread.as_ref();
+                    let color = if self.turns.contains_key(&th.id) {
+                        t.info
+                    } else if th.last_status == "error" {
+                        t.danger
+                    } else if th.last_status == "completed" {
+                        t.success
+                    } else {
+                        t.muted_foreground
+                    };
+                    icons = icons.child(
+                        div()
+                            .id(SharedString::from(format!("rail-thread-{}", th.id)))
+                            .w(px(10.))
+                            .h(px(10.))
+                            .rounded_full()
+                            .bg(if sel { color } else { color.opacity(0.55) })
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.run(Cmd::Thread(id.clone()), window, cx)
+                            })),
+                    );
+                }
+            }
+        }
+        let icon_btn = |id: &'static str,
+                        icon: IconName,
+                        tip: &'static str,
+                        cmd: Cmd,
+                        cx: &mut Context<Self>| {
+            Button::new(id)
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip(tip)
+                .on_click(cx.listener(move |this, _, window, cx| this.run(cmd.clone(), window, cx)))
+        };
+        v_flex()
+            .w(px(52.))
+            .h_full()
+            .flex_none()
+            .bg(t.sidebar)
+            .border_r_1()
+            .border_color(t.sidebar_border)
+            .child(icons)
+            .child(
+                v_flex()
+                    .p_2()
+                    .gap_1()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(t.sidebar_border)
+                    .child(icon_btn(
+                        "rail-new",
+                        IconName::Plus,
+                        "New thread",
+                        Cmd::NewThread,
+                        cx,
+                    ))
+                    .child(
+                        Button::new("rail-palette")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Search)
+                            .tooltip("Commands (Ctrl+K)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_palette(PaletteMode::Commands, "", window, cx)
+                            })),
+                    )
+                    .child(icon_btn(
+                        "rail-files",
+                        IconName::FileText,
+                        "Files (Ctrl+E)",
+                        Cmd::ToggleFiles,
+                        cx,
+                    ))
+                    .child(icon_btn(
+                        "rail-diff",
+                        IconName::Copy,
+                        "Diff (Ctrl+D)",
+                        Cmd::ToggleDiff,
+                        cx,
+                    ))
+                    .child(icon_btn(
+                        "rail-terminal",
+                        IconName::SquareTerminal,
+                        "Terminal (Ctrl+J)",
+                        Cmd::ToggleTerminal,
+                        cx,
+                    ))
+                    .child(icon_btn(
+                        "rail-plugins",
+                        IconName::Star,
+                        "Plugins (Ctrl+Shift+P)",
+                        Cmd::TogglePlugins,
+                        cx,
+                    ))
+                    .child(icon_btn(
+                        "rail-sessions",
+                        IconName::Inbox,
+                        "Sessions",
+                        Cmd::ToggleSessions,
+                        cx,
+                    ))
+                    .child(icon_btn(
+                        "rail-skills",
+                        IconName::BookOpen,
+                        "Skills",
+                        Cmd::ToggleSkills,
+                        cx,
+                    ))
+                    .child(icon_btn(
+                        "rail-settings",
+                        IconName::Settings,
+                        "Settings (Ctrl+,)",
+                        Cmd::Settings,
+                        cx,
+                    )),
+            )
+    }
+
+    fn render_terminal(&self, side: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let mut lines = v_flex().font_family(t.mono_font_family.clone()).text_xs();
         for l in self.terminal_lines.iter().rev().take(300).rev() {
             lines = lines.child(div().child(l.clone()));
         }
-        v_flex()
-            .h(px(240.))
-            .flex_none()
-            .border_t_1()
-            .border_color(t.border)
-            .bg(t.background)
+        let mut outer = v_flex().flex_none().border_color(t.border).bg(t.background);
+        outer = if side {
+            outer.w(px(300.)).h_full().border_l_1()
+        } else {
+            outer.h(px(240.)).border_t_1()
+        };
+        outer
             .child(
                 h_flex()
                     .h(px(32.))
@@ -2476,6 +3177,7 @@ impl GrayApp {
             );
         let body: AnyElement = match panel {
             Panel::Sessions => self.render_sessions(cx).into_any_element(),
+            Panel::Skills => self.render_skills(cx).into_any_element(),
             Panel::Viewer => self.render_viewer(cx).into_any_element(),
             Panel::Plugins => self.render_plugins(cx).into_any_element(),
             Panel::Diff => match &self.diff {
@@ -2701,40 +3403,135 @@ impl GrayApp {
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let (dp, _, dmode) = self.defaults();
-        let mut providers = h_flex().gap_1().flex_wrap();
-        for p in PROVIDERS {
-            let id = p.id.to_string();
-            providers = providers.child(
-                Button::new(SharedString::from(format!("settings-provider-{}", p.id)))
-                    .small()
-                    .label(p.label)
-                    .selected(dp == p.id)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.store.append(Event::SettingChanged {
-                            key: "default_provider".into(),
-                            value: id.clone(),
-                        });
-                        cx.notify();
-                    })),
+        let layout = self.store.state.setting("layout", "focus");
+        let auto_accept = self.store.state.setting("auto_accept", "false") == "true";
+        let term_side = self.store.state.setting("terminal_placement", "bottom") == "right";
+        let q = self.settings_query.to_lowercase();
+        let vis = |label: &str| q.is_empty() || fuzzy(&label.to_lowercase(), &q);
+        let nav = |_id: &'static str,
+                   icon: IconName,
+                   label: &'static str,
+                   section: &'static str,
+                   cx: &mut Context<Self>| {
+            let sel = self.settings_section == section;
+            let sec = section.to_string();
+            h_flex()
+                .id(SharedString::from(format!("settings-nav-{section}")))
+                .px_3()
+                .py_1p5()
+                .gap_2()
+                .rounded_md()
+                .text_sm()
+                .text_color(if sel {
+                    t.foreground
+                } else {
+                    t.muted_foreground
+                })
+                .cursor_pointer()
+                .hover(|s| s.bg(t.sidebar_accent))
+                .when(sel, |s| s.bg(t.sidebar_accent))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run(Cmd::SettingsSection(sec.clone()), window, cx)
+                }))
+                .child(Icon::new(icon).xsmall())
+                .child(div().flex_1().child(label))
+        };
+        let mut nav_col = v_flex()
+            .w(px(230.))
+            .h_full()
+            .flex_none()
+            .bg(t.sidebar)
+            .border_r_1()
+            .border_color(t.sidebar_border)
+            .p_3()
+            .gap_2()
+            .child(
+                h_flex()
+                    .id("settings-back")
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(t.muted_foreground)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(t.foreground))
+                    .on_click(cx.listener(|this, _, window, cx| this.close_overlays(window, cx)))
+                    .child(Icon::new(IconName::ArrowLeft).xsmall())
+                    .child("Back to app"),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(t.border)
+                    .child(Input::new(&self.settings_search).small()),
+            )
+            .child(nav(
+                "nav-preferences",
+                IconName::Settings,
+                "Preferences",
+                "preferences",
+                cx,
+            ))
+            .child(nav(
+                "nav-appearance",
+                IconName::Palette,
+                "Appearance",
+                "appearance",
+                cx,
+            ))
+            .child(nav(
+                "nav-shortcuts",
+                IconName::LayoutDashboard,
+                "Shortcuts",
+                "shortcuts",
+                cx,
+            ));
+        nav_col = nav_col.child(
+            div()
+                .px_3()
+                .pt_4()
+                .pb_1()
+                .text_xs()
+                .font_semibold()
+                .text_color(t.muted_foreground)
+                .child("PROJECTS"),
+        );
+        for p in &self.store.state.projects {
+            let pid = p.id.clone();
+            let sel = Some(&p.id) == self.active_project.as_ref();
+            nav_col = nav_col.child(
+                h_flex()
+                    .id(SharedString::from(format!("settings-project-{}", p.id)))
+                    .px_3()
+                    .py_1()
+                    .gap_2()
+                    .rounded_md()
+                    .text_sm()
+                    .text_color(if sel {
+                        t.foreground
+                    } else {
+                        t.muted_foreground
+                    })
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.sidebar_accent))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run(Cmd::Project(pid.clone()), window, cx)
+                    }))
+                    .child(Icon::new(IconName::Folder).xsmall())
+                    .child(div().flex_1().truncate().child(p.name.clone())),
             );
         }
-        let mut modes = h_flex().gap_1();
-        for (id, label) in MODES {
-            let id_s = id.to_string();
-            modes = modes.child(
-                Button::new(SharedString::from(format!("settings-mode-{id}")))
-                    .small()
-                    .label(*label)
-                    .selected(dmode == *id)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.store.append(Event::SettingChanged {
-                            key: "default_mode".into(),
-                            value: id_s.clone(),
-                        });
-                        cx.notify();
-                    })),
-            );
-        }
+        nav_col = nav_col.child(div().flex_1()).child(nav(
+            "nav-about",
+            IconName::Info,
+            "About",
+            "about",
+            cx,
+        ));
+
         let row = |label: &str, desc: &str, control: AnyElement| {
             h_flex()
                 .py_3()
@@ -2744,6 +3541,7 @@ impl GrayApp {
                 .child(
                     v_flex()
                         .flex_1()
+                        .min_w_0()
                         .child(div().text_sm().font_medium().child(label.to_string()))
                         .child(
                             div()
@@ -2754,87 +3552,165 @@ impl GrayApp {
                 )
                 .child(control)
         };
+        let opt = |id: SharedString, label: &str, sel: bool| {
+            Button::new(id)
+                .small()
+                .label(label.to_string())
+                .selected(sel)
+        };
+
+        let mut providers = h_flex().gap_1().flex_wrap();
+        for prov in PROVIDERS {
+            let id = prov.id.to_string();
+            providers = providers.child(
+                opt(
+                    SharedString::from(format!("settings-provider-{}", prov.id)),
+                    prov.label,
+                    dp == prov.id,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.persist(Event::SettingChanged {
+                        key: "default_provider".into(),
+                        value: id.clone(),
+                    });
+                    cx.notify();
+                })),
+            );
+        }
+        let mut modes = h_flex().gap_1();
+        for (id, label) in MODES {
+            let id_s = id.to_string();
+            modes = modes.child(
+                opt(
+                    SharedString::from(format!("settings-mode-{id}")),
+                    label,
+                    dmode == *id,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.persist(Event::SettingChanged {
+                        key: "default_mode".into(),
+                        value: id_s.clone(),
+                    });
+                    cx.notify();
+                })),
+            );
+        }
         let dark = t.mode.is_dark();
-        div()
-            .absolute()
-            .inset_0()
-            .bg(hsla(0., 0., 0., 0.35))
-            .flex()
-            .items_center()
-            .justify_center()
+        let mut content = v_flex()
+            .id("settings-content")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .p_8();
+        let mut page = v_flex().w(px(720.)).gap_1();
+        let (title, subtitle) = match self.settings_section.as_str() {
+            "appearance" => ("Appearance", "Theme and background"),
+            "shortcuts" => ("Shortcuts", "Keyboard shortcuts"),
+            "about" => ("About", "Version and data"),
+            _ => ("Preferences", "Customize layout and default behavior"),
+        };
+        page = page
+            .child(div().text_xl().font_semibold().child(title))
             .child(
-                v_flex()
-                    .w(px(640.))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(t.border)
-                    .bg(t.popover)
-                    .shadow_lg()
-                    .p_5()
-                    .child(
-                        h_flex()
-                            .pb_2()
-                            .child(div().text_lg().font_semibold().child("Settings"))
-                            .child(div().flex_1())
-                            .child(
-                                Button::new("settings-close")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Close)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.close_overlays(window, cx)
-                                    })),
-                            ),
-                    )
-                    .child(row(
-                        "Theme",
-                        "Light or dark appearance",
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new("settings-light")
-                                    .small()
-                                    .icon(IconName::Sun)
-                                    .label("Light")
-                                    .selected(!dark)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if dark {
-                                            this.run(Cmd::ToggleTheme, window, cx);
-                                            this.settings_open = true;
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new("settings-dark")
-                                    .small()
-                                    .icon(IconName::Moon)
-                                    .label("Dark")
-                                    .selected(dark)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if !dark {
-                                            this.run(Cmd::ToggleTheme, window, cx);
-                                            this.settings_open = true;
-                                        }
-                                    })),
-                            )
+                div()
+                    .pb_4()
+                    .text_sm()
+                    .text_color(t.muted_foreground)
+                    .child(subtitle),
+            );
+
+        match self.settings_section.as_str() {
+            "appearance" => {
+                page = page
+                    .when(vis("Theme"), |s| {
+                        s.child(row(
+                            "Theme",
+                            "Light or dark appearance",
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("settings-light")
+                                        .small()
+                                        .icon(IconName::Sun)
+                                        .label("Light")
+                                        .selected(!dark)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if dark {
+                                                this.run(Cmd::ToggleTheme, window, cx);
+                                            }
+                                        })),
+                                )
+                                .child(
+                                    Button::new("settings-dark")
+                                        .small()
+                                        .icon(IconName::Moon)
+                                        .label("Dark")
+                                        .selected(dark)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if !dark {
+                                                this.run(Cmd::ToggleTheme, window, cx);
+                                            }
+                                        })),
+                                )
+                                .into_any_element(),
+                        ))
+                    })
+                    .when(vis("Background"), |s| {
+                        s.child(row(
+                            "Background",
+                            "Dithered wallpaper (custom: /background <file>)",
+                            h_flex()
+                                .gap_1()
+                                .children(bg_rows(cx, self))
+                                .into_any_element(),
+                        ))
+                    });
+            }
+            "shortcuts" => {
+                for (keys, desc) in [
+                    ("Ctrl K", "Command palette"),
+                    ("Ctrl P", "File picker"),
+                    ("Ctrl N", "New thread"),
+                    ("Ctrl B", "Toggle sidebar"),
+                    ("Ctrl E", "Files panel"),
+                    ("Ctrl D", "Diff panel"),
+                    ("Ctrl J", "Terminal drawer"),
+                    ("Ctrl S", "Save editor file"),
+                    ("Ctrl ,", "Settings"),
+                    ("Ctrl Shift P", "Plugins"),
+                    ("Ctrl Shift V", "Viewer"),
+                    ("Ctrl Shift L", "Toggle theme"),
+                    ("Ctrl Shift E", "Next effort"),
+                    ("Enter", "Send message"),
+                    ("Shift Enter", "New line in composer"),
+                    ("Esc", "Close panel or overlay"),
+                ] {
+                    page = page.child(row(
+                        desc,
+                        "",
+                        div()
+                            .font_family(t.mono_font_family.clone())
+                            .text_xs()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(t.border)
+                            .child(keys)
                             .into_any_element(),
-                    ))
+                    ));
+                }
+            }
+            "about" => {
+                page = page
                     .child(row(
-                        "Default provider",
-                        "Used for new threads",
-                        providers.into_any_element(),
-                    ))
-                    .child(row(
-                        "Default access",
-                        "Runtime permission mode for new threads",
-                        modes.into_any_element(),
-                    ))
-                    .child(row(
-                        "Background",
-                        "Dithered wallpaper behind the chat (custom path: /background <file>)",
-                        h_flex()
-                            .gap_1()
-                            .children(bg_rows(cx, self))
+                        "Version",
+                        "gray-ide",
+                        div()
+                            .text_sm()
+                            .text_color(t.muted_foreground)
+                            .child(env!("CARGO_PKG_VERSION"))
                             .into_any_element(),
                     ))
                     .child(row(
@@ -2845,12 +3721,299 @@ impl GrayApp {
                             .text_color(t.muted_foreground)
                             .child(crate::data_dir().display().to_string())
                             .into_any_element(),
-                    )),
-            )
+                    ))
+                    .child(row(
+                        "Providers",
+                        "Supported agent CLIs",
+                        div()
+                            .text_xs()
+                            .text_color(t.muted_foreground)
+                            .child(
+                                PROVIDERS
+                                    .iter()
+                                    .map(|p| p.label)
+                                    .collect::<Vec<_>>()
+                                    .join(" \u{00b7} "),
+                            )
+                            .into_any_element(),
+                    ));
+            }
+            _ => {
+                let bar = |w: f32, h: f32, c: Hsla| div().w(px(w)).h(px(h)).rounded_sm().bg(c);
+                let mut cards = h_flex().gap_4().pb_4();
+                for (id, name, desc, sketch) in [
+                    (
+                        "focus",
+                        "Focus",
+                        "Roomy layout with the full sidebar. Made for prompting.",
+                        h_flex()
+                            .h(px(86.))
+                            .w_full()
+                            .gap_1()
+                            .p_1p5()
+                            .rounded_md()
+                            .bg(t.muted.opacity(0.25))
+                            .child(div().w(px(54.)).h_full().rounded_sm().bg(t.sidebar_accent))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_1()
+                                    .child(bar(f32::MAX, 9., t.sidebar_accent))
+                                    .child(bar(110., 6., t.muted.opacity(0.6)))
+                                    .child(bar(80., 6., t.muted.opacity(0.6)))
+                                    .child(bar(140., 6., t.muted.opacity(0.6)))
+                                    .child(div().flex_1().rounded_sm().bg(t.sidebar_accent)),
+                            )
+                            .into_any_element(),
+                    ),
+                    (
+                        "pro",
+                        "Pro",
+                        "Compact layout with an icon-first rail and minimal chrome.",
+                        h_flex()
+                            .h(px(86.))
+                            .w_full()
+                            .gap_1()
+                            .p_1p5()
+                            .rounded_md()
+                            .bg(t.muted.opacity(0.25))
+                            .child(div().w(px(10.)).h_full().rounded_sm().bg(t.sidebar_accent))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_1()
+                                    .child(bar(f32::MAX, 7., t.sidebar_accent))
+                                    .child(bar(120., 6., t.muted.opacity(0.6)))
+                                    .child(bar(90., 6., t.muted.opacity(0.6)))
+                                    .child(bar(150., 6., t.muted.opacity(0.6)))
+                                    .child(div().flex_1().rounded_sm().bg(t.sidebar_accent)),
+                            )
+                            .into_any_element(),
+                    ),
+                ] {
+                    let sel = layout == id;
+                    let id_s = id.to_string();
+                    cards = cards.child(
+                        v_flex()
+                            .id(SharedString::from(format!("layout-card-{id}")))
+                            .w(px(320.))
+                            .p_3()
+                            .gap_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(if sel { t.info } else { t.border })
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.run(Cmd::SetLayout(id_s.clone()), window, cx)
+                            }))
+                            .child(sketch)
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .w(px(14.))
+                                            .h(px(14.))
+                                            .rounded_full()
+                                            .border_2()
+                                            .border_color(if sel {
+                                                t.info
+                                            } else {
+                                                t.muted_foreground
+                                            })
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(sel, |s| {
+                                                s.child(
+                                                    div()
+                                                        .w(px(7.))
+                                                        .h(px(7.))
+                                                        .rounded_full()
+                                                        .bg(t.info),
+                                                )
+                                            }),
+                                    )
+                                    .child(div().text_sm().font_semibold().child(name)),
+                            )
+                            .child(div().text_xs().text_color(t.muted_foreground).child(desc)),
+                    );
+                }
+                page = page
+                    .when(vis("Layout"), |s| {
+                        s.child(div().pb_1().text_sm().font_semibold().child("Layout"))
+                            .child(cards)
+                    })
+                    .when(vis("Default provider"), |s| {
+                        s.child(row(
+                            "Default provider",
+                            "Used for new threads",
+                            providers.into_any_element(),
+                        ))
+                    })
+                    .when(vis("Default access"), |s| {
+                        s.child(row(
+                            "Default access",
+                            "Runtime permission mode for new threads",
+                            modes.into_any_element(),
+                        ))
+                    })
+                    .when(vis("Auto-accept permissions"), |s| {
+                        s.child(row(
+                            "Auto-accept permissions",
+                            "Approve permission requests without asking",
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("settings-autoaccept-on")
+                                        .small()
+                                        .label("On")
+                                        .selected(auto_accept)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.run(Cmd::SetAutoAccept(true), window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("settings-autoaccept-off")
+                                        .small()
+                                        .label("Off")
+                                        .selected(!auto_accept)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.run(Cmd::SetAutoAccept(false), window, cx)
+                                        })),
+                                )
+                                .into_any_element(),
+                        ))
+                    })
+                    .when(vis("Terminal placement"), |s| {
+                        s.child(row(
+                            "Terminal placement",
+                            "Where the terminal drawer lives",
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("settings-term-bottom")
+                                        .small()
+                                        .icon(IconName::PanelBottom)
+                                        .label("Bottom")
+                                        .selected(!term_side)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.run(
+                                                Cmd::SetTerminalPlacement("bottom".into()),
+                                                window,
+                                                cx,
+                                            )
+                                        })),
+                                )
+                                .child(
+                                    Button::new("settings-term-right")
+                                        .small()
+                                        .icon(IconName::PanelRight)
+                                        .label("Right")
+                                        .selected(term_side)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.run(
+                                                Cmd::SetTerminalPlacement("right".into()),
+                                                window,
+                                                cx,
+                                            )
+                                        })),
+                                )
+                                .into_any_element(),
+                        ))
+                    })
+                    .when(vis("Language"), |s| {
+                        s.child(row(
+                            "Language",
+                            "Display language",
+                            div()
+                                .text_sm()
+                                .text_color(t.muted_foreground)
+                                .child("English")
+                                .into_any_element(),
+                        ))
+                    });
+            }
+        }
+        content = content.child(page);
+        div()
+            .id("settings-page")
+            .absolute()
+            .inset_0()
+            .bg(t.background)
+            .child(h_flex().size_full().child(nav_col).child(content))
     }
 }
 
 impl GrayApp {
+    fn render_skills(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let mut rows = v_flex().gap_0p5();
+        for sk in &self.skills {
+            let name = sk.name.clone();
+            rows = rows.child(
+                h_flex()
+                    .id(SharedString::from(format!("skill-{}", sk.name)))
+                    .px_3()
+                    .py_2()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .font_family(t.mono_font_family.clone())
+                                            .text_xs()
+                                            .child(sk.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_family(t.mono_font_family.clone())
+                                            .text_color(t.info)
+                                            .child(sk.source.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .truncate()
+                                    .child(sk.description.clone()),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("use-skill-{}", sk.name)))
+                            .ghost()
+                            .xsmall()
+                            .label("Use")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.run(Cmd::UseSkill(name.clone()), window, cx)
+                            })),
+                    ),
+            );
+        }
+        if self.skills.is_empty() {
+            rows = rows.child(
+                div()
+                    .px_3()
+                    .py_6()
+                    .text_sm()
+                    .text_color(t.muted_foreground)
+                    .child("No skills found. Add SKILL.md files under .gray/skills/ in this project or ~/.gray/skills/."),
+            );
+        }
+        rows
+    }
+
     fn render_sessions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let mut rows = v_flex().gap_0p5();
@@ -3156,6 +4319,14 @@ fn relative(ms: i64) -> String {
 
 impl Render for GrayApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.pending_cmds.is_empty() {
+            let lines = std::mem::take(&mut self.pending_cmds);
+            for line in lines {
+                self.composer
+                    .update(cx, |s, cx| s.set_value(line, window, cx));
+                self.send(window, cx);
+            }
+        }
         self.write_snapshot(cx);
         let t = cx.theme().clone();
         let _ = window;
@@ -3165,18 +4336,62 @@ impl Render for GrayApp {
             .h_full()
             .child(self.render_header(cx))
             .child(self.render_timeline(cx))
+            .children(
+                self.pending_approval
+                    .as_ref()
+                    .map(|(_, label)| self.render_approval(label, cx)),
+            )
             .child(self.render_composer(cx));
-        if self.terminal_open {
-            center = center.child(self.render_terminal(cx));
+        let side_terminal = self.terminal_open
+            && self.store.state.setting("terminal_placement", "bottom") == "right";
+        if self.terminal_open && !side_terminal {
+            center = center.child(self.render_terminal(false, cx));
         }
-        let mut main = h_flex().size_full().min_h_0();
-        if self.sidebar_open {
-            main = main.child(self.render_sidebar(cx));
+        let mut center_outer = h_flex().flex_1().min_w_0().h_full().child(center);
+        if side_terminal {
+            center_outer = center_outer.child(self.render_terminal(true, cx));
         }
-        main = main.child(center);
+        let pro = self.store.state.setting("layout", "focus") == "pro";
+        let mut main = h_resizable("main-split").on_resize(cx.listener(
+            |this, state: &Entity<ResizableState>, _w, cx| {
+                let sizes: Vec<f32> = state
+                    .read(cx)
+                    .sizes()
+                    .iter()
+                    .map(|p| f32::from(*p))
+                    .collect();
+                if sizes != this.pane_sizes {
+                    this.pane_sizes = sizes;
+                }
+            },
+        ));
+        if pro {
+            main = main.child(
+                resizable_panel()
+                    .visible(self.sidebar_open)
+                    .size(px(52.))
+                    .size_range(px(52.)..px(52.))
+                    .child(self.render_rail(cx)),
+            );
+        } else {
+            main = main.child(
+                resizable_panel()
+                    .visible(self.sidebar_open)
+                    .size(px(232.))
+                    .size_range(px(160.)..px(460.))
+                    .child(self.render_sidebar(cx)),
+            );
+        }
+        main = main.child(resizable_panel().child(center_outer));
         if let Some(p) = self.panel {
-            main = main.child(self.render_panel(p, cx));
+            main = main.child(
+                resizable_panel()
+                    .size(px(400.))
+                    .size_range(px(260.)..px(760.))
+                    .child(self.render_panel(p, cx)),
+            );
         }
+        let main = div().size_full().min_w_0().min_h_0().child(main);
         let bg = self.store.state.setting("background", "none");
         div()
             .id("gray-root")
@@ -3279,7 +4494,14 @@ fn expand_mentions(text: &str, root: &Path) -> String {
         if rel.is_empty() || rel.contains("..") || !seen.insert(rel.to_string()) {
             continue;
         }
-        if let Ok(content) = std::fs::read_to_string(root.join(rel)) {
+        let full = root.join(rel);
+        let inside = full
+            .canonicalize()
+            .ok()
+            .zip(root.canonicalize().ok())
+            .map(|(f, r)| f.starts_with(&r))
+            .unwrap_or(false);
+        if inside && let Ok(content) = std::fs::read_to_string(&full) {
             let lang = workspace::language_for(rel);
             out.push_str(&format!(
                 "\n\n<file path=\"{rel}\">\n```{lang}\n{content}\n```\n</file>"

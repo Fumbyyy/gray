@@ -56,14 +56,30 @@ pub fn checkout(dir: &Path, name: &str, create: bool) -> Result<(), String> {
 }
 
 pub fn status(dir: &Path) -> Vec<(String, String)> {
-    git(dir, &["status", "--porcelain=v1", "-uall"])
-        .map(|s| {
-            s.lines()
-                .filter(|l| l.len() > 3)
-                .map(|l| (l[..2].trim().to_string(), l[3..].to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain=v1", "-z", "-uall"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+    let Some(out) = out else {
+        return Vec::new();
+    };
+    let mut recs = out.split('\0');
+    let mut res = Vec::new();
+    while let Some(r) = recs.next() {
+        if r.len() <= 3 {
+            continue;
+        }
+        let code = r[..2].trim().to_string();
+        if code.contains('R') || code.contains('C') {
+            let _ = recs.next();
+        }
+        res.push((code, r[3..].to_string()));
+    }
+    res
 }
 
 pub fn diff(dir: &Path) -> String {
@@ -84,6 +100,34 @@ pub fn diff(dir: &Path) -> String {
     text
 }
 
+pub fn diff_since(dir: &Path, base: &str) -> String {
+    let mut text = git(dir, &["diff", base, "--no-color"]).unwrap_or_default();
+    for (code, path) in status(dir) {
+        if code == "??"
+            && let Ok(d) = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["diff", "--no-color", "--no-index", "/dev/null", &path])
+                .output()
+        {
+            text.push_str(&String::from_utf8_lossy(&d.stdout));
+        }
+    }
+    text
+}
+
+pub fn files_since(dir: &Path, base: &str) -> Vec<String> {
+    let mut v: Vec<String> = git(dir, &["diff", "--name-only", base])
+        .map(|t| t.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+    for (code, path) in status(dir) {
+        if code == "??" && !v.contains(&path) {
+            v.push(path);
+        }
+    }
+    v
+}
+
 pub fn worktree_add(root: &Path, dir: &Path, branch: &str) -> Result<(), String> {
     let out = Command::new("git")
         .arg("-C")
@@ -100,10 +144,29 @@ pub fn worktree_add(root: &Path, dir: &Path, branch: &str) -> Result<(), String>
 }
 
 pub fn checkpoint(dir: &Path) -> Option<String> {
-    git(dir, &["add", "-A"])?;
-    let tree = git(dir, &["write-tree"])?.trim().to_string();
-    let _ = git(dir, &["reset", "-q"]);
-    Some(tree)
+    let index = std::env::temp_dir().join(format!("gray-ide-index-{}", std::process::id()));
+    let _ = std::fs::remove_file(&index);
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .env("GIT_INDEX_FILE", &index)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    };
+    let head = run(&["rev-parse", "--verify", "HEAD^{tree}"])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(tree) = &head {
+        run(&["read-tree", tree])?;
+    }
+    run(&["add", "-A"])?;
+    let tree = run(&["write-tree"]).map(|s| s.trim().to_string());
+    let _ = std::fs::remove_file(&index);
+    tree
 }
 
 pub fn restore(dir: &Path, tree: &str) -> Result<(), String> {

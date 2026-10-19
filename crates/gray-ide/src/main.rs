@@ -1,9 +1,12 @@
+#![recursion_limit = "512"]
 mod app;
 mod assets;
 mod git;
+mod graycmds;
 mod plugins;
 mod provider;
 mod sessions;
+mod skills;
 mod store;
 mod workspace;
 

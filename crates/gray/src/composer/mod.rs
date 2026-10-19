@@ -1155,9 +1155,6 @@ impl Tui {
             return false;
         }
         self.history_entries.pop();
-        while matches!(self.history_entries.last(), Some(TranscriptEntry::Gap(_))) {
-            self.history_entries.pop();
-        }
         self.reflow_on_resize(self.last_width);
         true
     }

@@ -346,8 +346,16 @@ impl Tui {
                 self.push_tool_box_lines(header, Vec::new());
             }
             self.seed_estimate_usage(q.estimate);
-            for line in std::mem::take(&mut q.tail) {
+            let tail = std::mem::take(&mut q.tail);
+            let trailer = !tail.is_empty();
+            if trailer {
+                self.ensure_gap();
+            }
+            for line in tail {
                 self.push_dim(line);
+            }
+            if trailer {
+                self.ensure_gap();
             }
         }
         self.end_insert_batch();
