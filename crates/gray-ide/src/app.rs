@@ -919,6 +919,25 @@ impl GrayApp {
                 Cmd::SetBackground(b.0.into()),
             ));
         }
+        if let Some(root) = self.work_root() {
+            for f in workspace::all_files(&root, 5000) {
+                let ext = f.rsplit('.').next().unwrap_or("").to_lowercase();
+                if !matches!(
+                    ext.as_str(),
+                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+                ) {
+                    continue;
+                }
+                items.push((
+                    format!("Attach: {f}"),
+                    k("Image"),
+                    Cmd::AttachImage(f.clone()),
+                ));
+                if items.len() > 80 {
+                    break;
+                }
+            }
+        }
         for (n, d) in &self.gray_cmds {
             items.push((format!("gray: {n}"), d.clone(), Cmd::Gray(n.clone())));
         }
