@@ -671,6 +671,53 @@ mod tests {
         assert_eq!(parser.screen().scrollback(), 0);
     }
 
+    /// Device queries in the output stream get replies on the writer,
+    /// and queries carried in the cross-read tail aren't answered twice.
+    #[test]
+    fn answers_device_queries() {
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                plock(&self.0).extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let replies = Arc::new(Mutex::new(Vec::new()));
+        let title = Arc::new(Mutex::new(None));
+        let shared = Shared {
+            writer: Mutex::new(Box::new(Sink(replies.clone())) as Box<dyn Write + Send>),
+            parser: Mutex::new(vt100::Parser::new_with_callbacks(
+                24,
+                80,
+                0,
+                TitleSink {
+                    title: Arc::clone(&title),
+                },
+            )),
+            rendered: Mutex::new(None),
+            dirty: AtomicBool::new(true),
+            exited: AtomicBool::new(false),
+            title,
+        };
+        let has = |pat: &[u8]| plock(&replies).windows(pat.len()).any(|w| w == pat);
+        answer_device_queries(&shared, 0, b"noise \x1b[>c mid \x1b[0c \x1b[5n end");
+        assert!(has(b"\x1b[>1;10;0c"), "secondary DA unanswered");
+        assert!(has(b"\x1b[?1;2c"), "primary DA unanswered");
+        assert!(has(b"\x1b[0n"), "status report unanswered");
+        // A query wholly inside the carried tail must not be re-answered.
+        // (Only the 3-byte ESC[c can fit a 3-byte tail; 4-byte queries
+        // always extend past it.)
+        plock(&replies).clear();
+        answer_device_queries(&shared, 3, b"\x1b[c rest");
+        assert!(!has(b"\x1b[?1;2c"), "tail query answered twice");
+        // But one split across the tail boundary is still caught.
+        answer_device_queries(&shared, 2, b"\x1b[c rest");
+        assert!(has(b"\x1b[?1;2c"), "boundary-split query missed");
+    }
+
     /// A one-shot command should produce output and exit (exercises the
     /// waiter thread). hostname.exe is a stock Windows console binary.
     #[test]

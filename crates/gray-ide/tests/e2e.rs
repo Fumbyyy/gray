@@ -46,14 +46,21 @@ struct Gray {
     env: Vec<(String, String)>,
 }
 
+fn e2e_available(name: &str) -> bool {
+    if !have("Xvfb") || !have("xdotool") {
+        eprintln!("skipping {name}: Xvfb and xdotool are required for e2e tests");
+        return false;
+    }
+    true
+}
+
 impl Gray {
     fn start(name: &str) -> Option<Self> {
         Self::start_with(name, "fake", Vec::new())
     }
 
     fn start_with(name: &str, provider: &str, env: Vec<(String, String)>) -> Option<Self> {
-        if !have("Xvfb") || !have("xdotool") {
-            eprintln!("skipping {name}: Xvfb and xdotool are required for e2e tests");
+        if !e2e_available(name) {
             return None;
         }
         let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -713,6 +720,10 @@ struct MockLlm {
 }
 
 fn mock_llm() -> MockLlm {
+    mock_llm_with_delay(0)
+}
+
+fn mock_llm_with_delay(delay_ms: u64) -> MockLlm {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -764,6 +775,9 @@ fn mock_llm() -> MockLlm {
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9}});
             resp.push_str(&format!("data: {done}\n\ndata: [DONE]\n\n"));
+            if delay_ms > 0 {
+                sleep(Duration::from_millis(delay_ms));
+            }
             let _ = stream.write_all(resp.as_bytes());
         }
     });
@@ -841,6 +855,109 @@ fn real_gray_cli_provider_streams_and_resumes_session() {
             && reqs[1].contains("Hello from mock turn 1")
             && reqs[1].contains("second question")
     );
+}
+
+#[test]
+fn gray_cli_steers_message_into_running_turn() {
+    let Some(bin) = gray_bin() else {
+        eprintln!("skipping: build the gray CLI first (cargo build -p gray at the repo root)");
+        return;
+    };
+    let llm = mock_llm_with_delay(4000);
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("gray-e2e")
+        .join("gray-steer-home");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let env = vec![
+        ("GRAY_IDE_GRAY_BIN".to_string(), bin.display().to_string()),
+        ("GRAY_HOME".to_string(), root.display().to_string()),
+        ("GRAY_BASE_URL".to_string(), llm.url.clone()),
+        ("GRAY_API_KEY".to_string(), "e2e-key".to_string()),
+        ("GRAY_MODEL".to_string(), "mock".to_string()),
+    ];
+    let Some(g) = Gray::start_with("gray_steer", "gray", env) else {
+        return;
+    };
+    g.send("first question for gray");
+    g.wait_for("turn running", |s| s["running"] == true);
+    g.send("steered follow-up");
+    g.wait_for("steer toast", |s| {
+        s["toast"]
+            .as_str()
+            .map(|t| t.contains("Steered"))
+            .unwrap_or(false)
+    });
+    let s = g.wait_for("steered turn finished", |s| {
+        finished(s) && messages(s).iter().any(|(_, t)| t.contains("turn 2"))
+    });
+    // Steered text was delivered into the running gray process: it shows
+    // up as a user message and reaches the model as a follow-up request
+    // inside the same session.
+    let msgs = messages(&s);
+    assert!(
+        msgs.iter()
+            .any(|(r, t)| r == "user" && t.contains("steered follow-up")),
+        "steered message missing from thread: {msgs:?}"
+    );
+    let reqs = llm.requests.lock().unwrap().clone();
+    assert!(
+        reqs.iter().skip(1).any(|r| r.contains("steered follow-up")),
+        "steered text never reached the model: {reqs:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn gray_ask_row_is_dismissed_not_stalled() {
+    // A shebang fake gray needs an exec'able script — same Linux/CI hosts
+    // that provide Xvfb. Check before creating fixture side effects.
+    if !e2e_available("gray_ask") {
+        return;
+    }
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("gray-e2e")
+        .join("fake-gray-ask");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let bin = root.join("fake-gray");
+    fs::write(
+        &bin,
+        r#"#!/bin/sh
+printf '%s\n' '{"type":"progress","phase":"ask","ask_id":7,"session_id":"ask-sess","questions":[{"id":"q","question":"Pick one?"}]}'
+IFS= read -r reply
+case "$reply" in
+  *'"ask_id":7'*) printf '%s\n' '{"type":"progress","phase":"text","delta":"ask reply received"}' ;;
+  *) printf '%s\n' '{"type":"progress","phase":"text","delta":"ask reply malformed"}' ;;
+esac
+printf '%s\n' '{"type":"result","session_id":"ask-sess","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"accounting":{"cost_micros":5,"requests":1}}'
+"#,
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+    }
+    let env = vec![("GRAY_IDE_GRAY_BIN".to_string(), bin.display().to_string())];
+    let Some(g) = Gray::start_with("gray_ask", "gray", env) else {
+        return;
+    };
+    g.send("trigger ask");
+    // Without the ask demux the child parks on `read` for 300s — the
+    // 25s wait_for deadline fails the test.
+    let s = g.wait_for("ask resolved", |s| {
+        finished(s)
+            && messages(s)
+                .iter()
+                .any(|(_, t)| t.contains("ask reply received"))
+    });
+    assert_eq!(s["thread"]["session"], "ask-sess");
+    assert_eq!(s["usage_total"], 7);
+    assert!(s["activities"].as_array().unwrap().iter().any(|a| {
+        a["kind"] == "approval" && a["label"].as_str().unwrap_or("").contains("dismissed")
+    }));
 }
 
 #[test]
@@ -1352,4 +1469,139 @@ fn skills_panel_lists_and_pastes_skill() {
         finished(s) && s["messages"].to_string().contains("write skill.txt")
     });
     assert!(g.project.join("skill.txt").exists());
+}
+
+#[test]
+fn queued_message_lands_on_its_own_thread() {
+    let Some(g) = Gray::start("queue_target") else {
+        return;
+    };
+    g.send("slow first prompt");
+    g.wait_for("first turn running", |s| s["running"] == true);
+    g.send("queued-for-alpha");
+    g.wait_for("message queued", |s| s["queue_len"] == 1);
+    // Switch to a second thread while the first turn is still running.
+    g.send("/new");
+    g.wait_for("second thread active", |s| {
+        s["threads"]
+            .as_array()
+            .map(|t| t.len() == 2)
+            .unwrap_or(false)
+            && s["thread"]["title"] == "New thread"
+    });
+    // When the first turn finishes, the queued message must be delivered
+    // to ITS thread — not the now-active second thread. The first turn's
+    // completion also marks it unread since it isn't in focus.
+    g.wait_for("first turn done, thread unread", |s| {
+        s["unread"]
+            .as_array()
+            .map(|u| !u.is_empty())
+            .unwrap_or(false)
+    });
+    g.palette("thread: slow first");
+    g.wait_for("queued message on original thread", |s| {
+        messages(s)
+            .iter()
+            .any(|(r, t)| r == "user" && t.contains("queued-for-alpha"))
+    });
+    g.palette("thread: new thread");
+    g.wait_for("back on second thread", |s| {
+        s["thread"]["title"] == "New thread"
+    });
+    let s = g.state();
+    assert!(
+        !messages(&s)
+            .iter()
+            .any(|(_, t)| t.contains("queued-for-alpha")),
+        "queued message leaked onto the active thread"
+    );
+}
+
+#[test]
+fn inbox_marks_background_thread_unread() {
+    let Some(g) = Gray::start("inbox_unread") else {
+        return;
+    };
+    g.send("slow inbox probe");
+    g.wait_for("first turn running", |s| s["running"] == true);
+    g.send("/new");
+    g.wait_for("second thread active", |s| {
+        s["threads"]
+            .as_array()
+            .map(|t| t.len() == 2)
+            .unwrap_or(false)
+    });
+    g.wait_for("first turn marked unread", |s| {
+        s["unread"]
+            .as_array()
+            .map(|u| !u.is_empty())
+            .unwrap_or(false)
+    });
+    g.send("/inbox");
+    g.wait_for("inbox open", |s| s["panel"] == "Inbox");
+    g.screenshot("inbox");
+    g.palette("thread: slow inbox");
+    g.wait_for("unread cleared by opening thread", |s| {
+        s["unread"].as_array().map(|u| u.is_empty()).unwrap_or(true)
+    });
+}
+
+#[test]
+fn review_desk_lists_turn_checkpoints_and_usage() {
+    let Some(g) = Gray::start("review_desk") else {
+        return;
+    };
+    g.send("write review-me.txt hello review");
+    g.wait_for("first turn finished", finished);
+    g.send("/review");
+    g.wait_for("review panel", |s| s["panel"] == "Review");
+    g.wait_for("one checkpoint span", |s| s["review_spans"] == 1);
+    assert!(
+        g.state()["usage_total"].as_u64().unwrap_or(0) > 0,
+        "usage not accumulated"
+    );
+    g.screenshot("review-desk");
+    g.send("another turn please");
+    g.wait_for("second turn finished", |s| {
+        finished(s) && messages(s).len() >= 4
+    });
+    g.wait_for("two spans", |s| s["review_spans"] == 2);
+    assert_eq!(
+        g.state()["thread"]["usage_total"].as_u64().unwrap_or(0),
+        104
+    );
+}
+
+#[test]
+fn launcher_creates_and_starts_task() {
+    let Some(g) = Gray::start("task_launcher") else {
+        return;
+    };
+    g.palette("new task");
+    g.wait_for("launcher open", |s| s["launcher_open"] == true);
+    g.screenshot("launcher");
+    g.type_text("launch a probe");
+    g.key("Return");
+    g.wait_for("task launched", |s| {
+        s["launcher_open"] == false && s["thread"]["title"] == "launch a probe"
+    });
+    g.wait_for("task finished", finished);
+}
+
+#[test]
+fn exec_slash_runs_in_pty_terminal() {
+    let Some(g) = Gray::start("exec_term") else {
+        return;
+    };
+    g.send("/exec echo exec-probe-91");
+    g.wait_for("terminal opened", |s| s["terminal_open"] == true);
+    g.wait_for("command output visible", |s| {
+        s["pty_lines"]
+            .as_array()
+            .map(|ls| {
+                ls.iter()
+                    .any(|l| l.as_str().unwrap_or("").contains("exec-probe-91"))
+            })
+            .unwrap_or(false)
+    });
 }

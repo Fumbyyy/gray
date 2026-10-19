@@ -324,8 +324,7 @@ fn run_process(
                         && let Ok(mut g) = steer.lock()
                         && let Some(stdin) = g.as_mut()
                     {
-                        let reply =
-                            serde_json::json!({"ask_id": ask_id, "answers": {}});
+                        let reply = serde_json::json!({"ask_id": ask_id, "answers": {}});
                         let _ = writeln!(stdin, "{reply}");
                     }
                     let _ = tx.send(ProviderEvent::Activity {
@@ -733,4 +732,179 @@ fn write_file(root: &Path, rel: &str, content: &str) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     std::fs::write(&path, format!("{}\n", content.replace("\\n", "\n"))).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    const CHILD_ENV: &str = "GRAY_IDE_TEST_CHILD";
+
+    /// Spawn this test binary in a protocol-fixture role. This exercises
+    /// the real stdin/stdout child contract without depending on `sh`,
+    /// so the tests also run on Windows.
+    fn test_child(test: &str, mode: &str) -> Command {
+        let mut cmd = Command::new(std::env::current_exe().expect("current test binary"));
+        cmd.arg("--ignored")
+            .arg("--exact")
+            .arg(format!("provider::tests::{test}"))
+            .arg("--nocapture")
+            .env(CHILD_ENV, mode);
+        cmd
+    }
+
+    #[test]
+    #[ignore]
+    fn child_ask_process() {
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("ask") {
+            return;
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "progress",
+                "phase": "ask",
+                "ask_id": 7,
+                "questions": [{"id": "q", "question": "Pick one?"}],
+            })
+        );
+        std::io::stdout().flush().unwrap();
+        let mut reply = String::new();
+        std::io::stdin().lock().read_line(&mut reply).unwrap();
+        let answered = serde_json::from_str::<serde_json::Value>(&reply)
+            .ok()
+            .is_some_and(|v| {
+                v.get("ask_id").and_then(|id| id.as_u64()) == Some(7)
+                    && v.get("answers").is_some_and(|a| a.is_object())
+            });
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "progress",
+                "phase": "text",
+                "delta": if answered { "ask answered" } else { "unexpected reply" },
+            })
+        );
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "result",
+                "session_id": "s1",
+                "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+                "accounting": {"cost_micros": 5, "requests": 1},
+            })
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn child_echo_process() {
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("echo") {
+            return;
+        }
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        let ok = serde_json::from_str::<serde_json::Value>(&line)
+            .ok()
+            .is_some_and(|v| {
+                v.get("type").and_then(|t| t.as_str()) == Some("steer")
+                    && v.get("text").and_then(|t| t.as_str()) == Some("hello steer")
+            });
+        println!("echoed:{}", if ok { "steer ok" } else { "bad steer" });
+    }
+
+    /// A child that emits a gray demuxed ask row
+    /// (`{"type":"progress","phase":"ask","ask_id":N}`) and then blocks on
+    /// stdin must receive an `{"ask_id":N,"answers":{...}}` reply. Without
+    /// it the child stalls for gray's 300s ask timeout.
+    #[test]
+    fn ask_row_is_answered_on_child_stdin() {
+        let (tx, rx) = channel();
+        let slot = Arc::new(Mutex::new(None::<Child>));
+        let stdin = Arc::new(Mutex::new(None::<ChildStdin>));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cmd = test_child("child_ask_process", "ask");
+        run_process(cmd, &tx, &slot, &cancelled, parse_gray, Some(stdin))
+            .expect("run_process should finish once the ask is answered");
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProviderEvent::Activity { kind, label, .. }
+                    if kind == "approval" && label.contains("dismissed")
+            )),
+            "ask was not surfaced as an activity: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::Text(t) if t.contains("ask answered"))),
+            "child never saw a valid ask reply: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::Usage { total: 7, .. })),
+            "usage row was not parsed: {events:?}"
+        );
+    }
+
+    /// `Turn::steer` must write gray's `{"type":"steer","text":...}` line
+    /// to the running child's stdin.
+    #[test]
+    fn steer_writes_json_line_to_child_stdin() {
+        let (tx, rx) = channel();
+        let slot = Arc::new(Mutex::new(None::<Child>));
+        let stdin = Arc::new(Mutex::new(None::<ChildStdin>));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stdin_slot = stdin.clone();
+        let slot_clone = slot.clone();
+        let flag = cancelled.clone();
+        let handle = thread::spawn(move || {
+            let cmd = test_child("child_echo_process", "echo");
+            run_process(cmd, &tx, &slot_clone, &flag, parse_gray, Some(stdin_slot))
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if stdin.lock().map(|g| g.is_some()).unwrap_or(false) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "run_process never handed over child stdin"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let (_etx, erx) = channel();
+        let turn = Turn {
+            rx: erx,
+            pending: Arc::new(Mutex::new(None)),
+            stdin,
+            child: slot,
+            cancelled,
+        };
+        turn.steer("hello steer").expect("steer write failed");
+        handle.join().expect("run_process panicked").unwrap();
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProviderEvent::Text(t) if t.contains("echoed:steer ok")
+            )),
+            "steer line did not reach child stdin as valid JSON: {events:?}"
+        );
+    }
+
+    #[test]
+    fn demux_ask_id_matches_only_ask_rows() {
+        let ask = serde_json::json!({"type":"progress","phase":"ask","ask_id":3});
+        assert_eq!(demux_ask_id(&ask), Some(3));
+        let text = serde_json::json!({"type":"progress","phase":"text","delta":"hi"});
+        assert_eq!(demux_ask_id(&text), None);
+        let missing_id = serde_json::json!({"type":"progress","phase":"ask"});
+        assert_eq!(demux_ask_id(&missing_id), None);
+        let result = serde_json::json!({"type":"result","ask_id":9});
+        assert_eq!(demux_ask_id(&result), None);
+    }
 }

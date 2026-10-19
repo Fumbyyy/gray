@@ -1580,11 +1580,15 @@ impl GrayApp {
                 // strings) and land on a shell command line in the pty —
                 // restrict to a safe charset and quote it regardless.
                 let safe = !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.' | '/' | '@'));
+                    && name.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.' | '/' | '@')
+                    });
                 if !safe {
-                    self.toast(format!("Refusing to run unsafe command name '{name}'"), true);
+                    self.toast(
+                        format!("Refusing to run unsafe command name '{name}'"),
+                        true,
+                    );
+                    cx.notify();
                     return;
                 }
                 self.terminal_open = true;
