@@ -505,6 +505,7 @@ pub(crate) async fn run_prompt_turn(
                     let mut t = shared.lock().expect("tui lock");
                     t.end_thinking();
                     t.discard_held_punctuation();
+                    t.flush_markdown();
 
                     t.ensure_gap();
                     t.push_dim(INTERRUPTED_NOTICE.to_string());
@@ -565,6 +566,7 @@ pub(crate) async fn run_prompt_turn(
                 if let Some((shared, _)) = tui {
                     let mut t = shared.lock().expect("tui lock");
                     t.end_thinking();
+                    t.flush_markdown();
                     t.ensure_gap();
 
                     t.push_error(&msg);
@@ -594,22 +596,18 @@ pub(crate) async fn run_prompt_turn(
     if interactive && let Some((shared, _)) = tui {
         let mut t = shared.lock().expect("tui lock");
         if let Some(text) = t.local_command.take() {
-            drop(t);
-
             let parsed = parse_command(&text);
-            if parsed.runs_local() || matches!(parsed, ReplCommand::Skill(_)) {
-                shared.lock().expect("tui lock").retract_slash_echo(&text);
+            if !parsed.runs_local() && !matches!(parsed, ReplCommand::Skill(_)) {
+                t.push_user_prompt(&text, &[], false);
             }
+            drop(t);
             *pending_command = Some(expand_skill_command(parsed, cwd, Some(shared), true));
         } else if let Some((qtext, qimages)) = t.queued_inputs.pop_front() {
-            if t.retract_slash_echo(&qtext) {
+            let parsed = parse_command(&qtext);
+            if !parsed.runs_local() {
                 t.push_user_prompt(&qtext, &qimages, !qtext.starts_with('/'));
             }
             drop(t);
-            let parsed = parse_command(&qtext);
-            if parsed.runs_local() {
-                shared.lock().expect("tui lock").retract_slash_echo(&qtext);
-            }
             *pending_command = Some(expand_skill_command(parsed, cwd, Some(shared), false));
             *pending_images = qimages;
         }
@@ -625,8 +623,11 @@ pub(crate) async fn run_prompt_turn(
 fn take_steerable(
     queued: &mut std::collections::VecDeque<(String, Vec<std::path::PathBuf>)>,
 ) -> Option<String> {
-    let position = queued.iter().position(|(_, images)| images.is_empty())?;
-    queued.remove(position).map(|(text, _)| text)
+    let (text, images) = queued.front()?;
+    if !images.is_empty() || text.starts_with('/') {
+        return None;
+    }
+    queued.pop_front().map(|(text, _)| text)
 }
 
 fn steer_direct_send(
@@ -654,6 +655,8 @@ fn steer_direct_send(
         }
         if let Some(msg) = &msg {
             let text = crate::session_send::prompt_for(&msg.from, &msg.text);
+            t.flush_markdown();
+            t.end_thinking();
             t.push_user_prompt(&text, &[], true);
             let _ = t.draw();
         }
@@ -664,11 +667,10 @@ fn steer_direct_send(
 fn steer_queued_input(tui: Option<&crate::composer::SharedTui>) -> Option<String> {
     let mut t = tui?.lock().expect("tui lock");
     let text = take_steerable(&mut t.queued_inputs)?;
-
-    if t.retract_slash_echo(&text) {
-        t.push_user_prompt(&text, &[], true);
-        let _ = t.draw();
-    }
+    t.flush_markdown();
+    t.end_thinking();
+    t.push_user_prompt(&text, &[], true);
+    let _ = t.draw();
     Some(text)
 }
 

@@ -293,7 +293,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         max_viewport_h,
     );
 
-    let desired = desired.max(latched_viewport_floor(
+    let floor = latched_viewport_floor(
         status_h,
         queued_est,
         live_est + tail_est + widget_h + ask_est,
@@ -301,11 +301,16 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         attach_h,
         footer_h,
         max_viewport_h,
-    ));
+    );
+    let desired = desired.max(floor);
+    let overlay = desired.saturating_sub(floor).min(panel_est);
 
     tui.begin_sync();
 
-    if let Err(e) = tui.terminal.set_viewport_height(desired, screen_size) {
+    if let Err(e) = tui
+        .terminal
+        .set_viewport_height(desired, overlay, screen_size)
+    {
         tui.end_sync();
         return Err(e.into());
     }

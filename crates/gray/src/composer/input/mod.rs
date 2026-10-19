@@ -106,6 +106,39 @@ pub(crate) fn clear_draft(tui: &mut Tui) {
 
 pub(crate) use crate::term_keys::KeyboardEnhancementGuard;
 
+/// The keyboard-enhancement push/pop writes raw escapes to stdout; on this
+/// thread they race the composer's draws and a torn `\x1b[>5u` leaks its
+/// tail as literal text. Run both under the tui lock.
+pub(crate) struct LockedEnhancement {
+    inner: Option<crate::term_keys::KeyboardEnhancementGuard>,
+    tui: Option<super::SharedTui>,
+}
+
+impl LockedEnhancement {
+    pub(crate) fn push(tui: Option<super::SharedTui>) -> Self {
+        let inner = {
+            let _tui = tui
+                .as_ref()
+                .map(|s| s.lock().unwrap_or_else(|e| e.into_inner()));
+            crate::term_keys::KeyboardEnhancementGuard::push()
+        };
+        Self {
+            inner: Some(inner),
+            tui,
+        }
+    }
+}
+
+impl Drop for LockedEnhancement {
+    fn drop(&mut self) {
+        let _tui = self
+            .tui
+            .as_ref()
+            .map(|s| s.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(self.inner.take());
+    }
+}
+
 pub(crate) fn strip_escape_sequences(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
@@ -149,10 +182,13 @@ pub(crate) fn read_line(
 ) -> anyhow::Result<Option<(String, Vec<PathBuf>)>> {
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read};
 
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
-    let _keyboard_enhancement = KeyboardEnhancementGuard::push();
-    crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(std::io::stdout(), crossterm::cursor::Show)?;
+    {
+        let _tui = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
+        crossterm::terminal::enable_raw_mode()?;
+        crossterm::execute!(std::io::stdout(), crossterm::cursor::Show)?;
+    }
+    let _keyboard_enhancement = LockedEnhancement::push(Some(shared.clone()));
 
     watch_dead_stdin();
     let mut needs_draw = true;
@@ -262,12 +298,11 @@ pub(crate) fn read_line(
                     tui.matches.clear();
                     tui.sel = 0;
                     if tui.is_task_running {
-                        tui.push_user_prompt(&cmd, &[], false);
                         tui.queued_inputs.push_back((cmd, Vec::new()));
                         let _ = tui.draw();
                         continue;
                     }
-                    tui.push_user_prompt(&cmd, &[], false);
+                    echo_submit(tui, &cmd, &[]);
                     return Ok(Some((cmd, Vec::new())));
                 }
                 KeyOutcome::Submit => {
@@ -292,7 +327,6 @@ pub(crate) fn read_line(
                     let attached: Vec<PathBuf> = std::mem::take(&mut tui.attachments);
                     tui.textarea.set_text("");
                     if tui.is_task_running {
-                        tui.push_user_prompt(&trimmed, &attached, !trimmed.starts_with('/'));
                         tui.queued_inputs
                             .push_back((trimmed.clone(), attached.clone()));
                         tui.matches.clear();
@@ -307,12 +341,18 @@ pub(crate) fn read_line(
                         return Ok(Some((trimmed, attached)));
                     }
 
-                    tui.push_user_prompt(&trimmed, &attached, !trimmed.starts_with('/'));
+                    echo_submit(tui, &trimmed, &attached);
                     return Ok(Some((trimmed, attached)));
                 }
             },
             _ => {}
         }
+    }
+}
+
+fn echo_submit(tui: &mut Tui, text: &str, attached: &[PathBuf]) {
+    if !crate::repl::parse_command(text).runs_local() {
+        tui.push_user_prompt(text, attached, !text.starts_with('/'));
     }
 }
 
