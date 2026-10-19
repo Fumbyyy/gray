@@ -196,6 +196,22 @@ impl Gray {
         sleep(Duration::from_millis(200));
     }
 
+    fn drag(&self, x: i32, y: i32, dx: i32, dy: i32) {
+        let steps = 8;
+        self.xdo(&["mousemove", &x.to_string(), &y.to_string()]);
+        sleep(Duration::from_millis(150));
+        self.xdo(&["mousedown", "1"]);
+        sleep(Duration::from_millis(120));
+        for i in 1..=steps {
+            let xi = x + dx * i / steps;
+            let yi = y + dy * i / steps;
+            self.xdo(&["mousemove", &xi.to_string(), &yi.to_string()]);
+            sleep(Duration::from_millis(40));
+        }
+        self.xdo(&["mouseup", "1"]);
+        sleep(Duration::from_millis(250));
+    }
+
     fn type_text(&self, text: &str) {
         self.xdo(&["type", "--delay", "20", text]);
         sleep(Duration::from_millis(150));
@@ -1214,5 +1230,55 @@ fn settings_page_layouts_toggles_and_terminal_side() {
     g.restart();
     g.wait_for("settings persist", |s| {
         s["layout"] == "pro" && s["auto_accept"] == true && s["terminal_placement"] == "right"
+    });
+}
+
+#[test]
+fn resizable_sidebar_drag_widens_pane() {
+    let Some(g) = Gray::start("resize") else {
+        return;
+    };
+    g.wait_for("ready", |s| s["ready"] == true);
+    for x in [230, 232, 234, 236, 228] {
+        g.drag(x, 300, 90, 0);
+        if g.state()["pane_sizes"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_f64())
+            .map(|w| w > 240.)
+            .unwrap_or(false)
+        {
+            break;
+        }
+    }
+    g.wait_for("sidebar widened", |s| {
+        s["pane_sizes"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_f64())
+            .map(|w| w > 260.)
+            .unwrap_or(false)
+    });
+    g.screenshot("wide-sidebar");
+    let w0 = g.state()["pane_sizes"][0].as_f64().unwrap_or(320.) as i32;
+    for x in [w0 - 4, w0, w0 + 4, w0 - 8, w0 + 8] {
+        g.drag(x, 300, -140, 0);
+        if g.state()["pane_sizes"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_f64())
+            .map(|w| w < 240.)
+            .unwrap_or(false)
+        {
+            break;
+        }
+    }
+    g.wait_for("sidebar narrowed", |s| {
+        s["pane_sizes"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_f64())
+            .map(|w| w < 240.)
+            .unwrap_or(false)
     });
 }

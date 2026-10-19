@@ -14,6 +14,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{
     ActiveTheme, Icon, IconName, Selectable, Sizable, StyledExt, Theme, ThemeMode, h_flex, v_flex,
 };
+use gpui_kit::component::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
@@ -179,6 +180,7 @@ pub struct GrayApp {
     pending_approval: Option<(String, String)>,
     settings_section: String,
     settings_query: String,
+    pane_sizes: Vec<f32>,
     gray_cmd_rx: Receiver<Vec<(String, String)>>,
     active_tab: Option<usize>,
     diff: Option<Entity<DiffState>>,
@@ -299,6 +301,7 @@ impl GrayApp {
             pending_approval: None,
             settings_section: "preferences".into(),
             settings_query: String::new(),
+            pane_sizes: Vec::new(),
             gray_cmd_rx,
             window_handle: None,
             pending_cmds: Vec::new(),
@@ -1830,6 +1833,7 @@ impl GrayApp {
             "layout": self.store.state.setting("layout", "focus"),
             "auto_accept": self.store.state.setting("auto_accept", "false") == "true",
             "terminal_placement": self.store.state.setting("terminal_placement", "bottom"),
+            "pane_sizes": self.pane_sizes,
             "terminal": self.terminal_lines.iter().rev().take(40).rev().cloned().collect::<Vec<_>>(),
             "composer": self.composer.read(cx).value().to_string(),
             "toast": self.toast.as_ref().map(|t| t.0.clone()),
@@ -4124,18 +4128,47 @@ impl Render for GrayApp {
         if side_terminal {
             center_outer = center_outer.child(self.render_terminal(true, cx));
         }
-        let mut main = h_flex().size_full().min_h_0();
-        if self.sidebar_open {
-            if self.store.state.setting("layout", "focus") == "pro" {
-                main = main.child(self.render_rail(cx));
-            } else {
-                main = main.child(self.render_sidebar(cx));
-            }
+        let pro = self.store.state.setting("layout", "focus") == "pro";
+        let mut main = h_resizable("main-split").on_resize(cx.listener(
+            |this, state: &Entity<ResizableState>, _w, cx| {
+                let sizes: Vec<f32> = state
+                    .read(cx)
+                    .sizes()
+                    .iter()
+                    .map(|p| f32::from(*p))
+                    .collect();
+                if sizes != this.pane_sizes {
+                    this.pane_sizes = sizes;
+                }
+            },
+        ));
+        if pro {
+            main = main.child(
+                resizable_panel()
+                    .visible(self.sidebar_open)
+                    .size(px(52.))
+                    .size_range(px(52.)..px(52.))
+                    .child(self.render_rail(cx)),
+            );
+        } else {
+            main = main.child(
+                resizable_panel()
+                    .visible(self.sidebar_open)
+                    .size(px(232.))
+                    .size_range(px(160.)..px(460.))
+                    .child(self.render_sidebar(cx)),
+            );
         }
-        main = main.child(center_outer);
+        main = main.child(resizable_panel().child(center_outer));
         if let Some(p) = self.panel {
-            main = main.child(self.render_panel(p, cx));
+            main = main.child(
+                resizable_panel()
+                    .size(px(400.))
+                    .size_range(px(260.)..px(760.))
+                    .child(self.render_panel(p, cx)),
+            );
         }
+        let main = div().size_full().min_w_0().min_h_0().child(main);
         let bg = self.store.state.setting("background", "none");
         div()
             .id("gray-root")
