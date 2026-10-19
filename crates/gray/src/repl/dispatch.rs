@@ -626,15 +626,26 @@ pub(crate) async fn dispatch_command(
                                 if std::io::stdin().is_terminal()
                                     && std::io::stdout().is_terminal() =>
                             {
+                                let before = installed_plugin_names();
                                 let status = with_modal_sync(shared, || {
                                     super::maintenance::with_terminal(shared, || {
-                                        std::process::Command::new(prog).args(rest).status()
+                                        let mut child = std::process::Command::new(prog);
+                                        child.args(rest);
+                                        if let Ok(exe) = std::env::current_exe() {
+                                            child.env("GRAY_EXE", exe);
+                                        }
+                                        child.status()
                                     })
                                 });
                                 match status {
                                     Ok(s) if s.success() => {}
                                     Ok(s) => say(shared, &format!("{name} exited: {s}")),
                                     Err(e) => say(shared, &format!("{name}: {e}")),
+                                }
+                                if installed_plugin_names() != before {
+                                    let sid = session_state.as_ref().map(|s| s.session_id.as_str());
+                                    reload_agent(agent, config, cwd, sid, shared).await;
+                                    say(shared, "plugins changed, reloaded");
                                 }
                             }
                             _ => say(
@@ -770,4 +781,13 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
     })
+}
+
+/// Installed plugin names from the user lock file, so a terminal handoff that
+/// installs or removes plugins (the account plugin's `/marketplace`) can
+/// activate them without a restart.
+fn installed_plugin_names() -> Option<std::collections::BTreeSet<String>> {
+    let home = gray_core::paths::gray_home()?;
+    let lock = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(&home)).ok()?;
+    Some(lock.plugins.into_keys().collect())
 }
