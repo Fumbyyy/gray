@@ -215,7 +215,8 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                 Some(CommandOutcome::ModelPicker(_))
                 | Some(CommandOutcome::SubagentSettings(_))
                 | Some(CommandOutcome::Panel(_))
-                | Some(CommandOutcome::Picker(_)) => {
+                | Some(CommandOutcome::Picker(_))
+                | Some(CommandOutcome::Terminal { .. }) => {
                     // Pickers and settings mutate session state and own the
                     // modal surface — rerun through the full dispatch once
                     // the turn ends instead of racing the running turn.

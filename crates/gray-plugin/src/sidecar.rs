@@ -1230,7 +1230,7 @@ impl Plugin for SidecarPlugin {
             .request("command/run", Some(params), Duration::from_secs(30))
             .await
             .ok()?;
-        command_outcome(&v)
+        command_outcome(&v, &self.transport.argv)
     }
     async fn on_event(&self, e: CoreEvent) {
         let session = session_json(&self.pinned_sid(), &self.cwd);
@@ -1570,8 +1570,17 @@ fn attach_media(name: &str, out: &mut ToolOutput, reply: &Value) {
     }
 }
 
-pub(crate) fn command_outcome(v: &Value) -> Option<CommandOutcome> {
+pub(crate) fn command_outcome(v: &Value, plugin_argv: &[String]) -> Option<CommandOutcome> {
     let field = |k: &str| v.get(k).and_then(|t| t.as_str()).filter(|t| !t.is_empty());
+    if let Some(args) = v.get("terminal").and_then(Value::as_array)
+        && !plugin_argv.is_empty()
+    {
+        let args = args.iter().filter_map(|a| a.as_str().map(str::to_string));
+        return Some(CommandOutcome::Terminal {
+            argv: plugin_argv.iter().cloned().chain(args).collect(),
+            text: field("text").map(str::to_string),
+        });
+    }
     if let Some(plugin) = field("subagent_settings") {
         return Some(CommandOutcome::SubagentSettings(plugin.to_string()));
     }

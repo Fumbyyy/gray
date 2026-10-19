@@ -406,6 +406,7 @@ pub(crate) async fn dispatch_command(
                     | Some(CommandOutcome::SubagentSettings(_))
                     | Some(CommandOutcome::Panel(_))
                     | Some(CommandOutcome::Picker(_))
+                    | Some(CommandOutcome::Terminal { .. })
                     | None => ReplCommand::ProviderLogin(provider_id),
                     Some(CommandOutcome::Say(text)) => {
                         say(tui.as_ref().map(|(s, _)| s), &text);
@@ -612,6 +613,37 @@ pub(crate) async fn dispatch_command(
                             None => "subagents settings needs the TUI".to_string(),
                         };
                         say(tui.as_ref().map(|(s, _)| s), &msg);
+                    }
+
+                    CommandOutcome::Terminal {
+                        argv: cmd_argv,
+                        text,
+                    } => {
+                        let shared = tui.as_ref().map(|(s, _)| s);
+                        use std::io::IsTerminal as _;
+                        match cmd_argv.split_first() {
+                            Some((prog, rest))
+                                if std::io::stdin().is_terminal()
+                                    && std::io::stdout().is_terminal() =>
+                            {
+                                let status = with_modal_sync(shared, || {
+                                    super::maintenance::with_terminal(shared, || {
+                                        std::process::Command::new(prog).args(rest).status()
+                                    })
+                                });
+                                match status {
+                                    Ok(s) if s.success() => {}
+                                    Ok(s) => say(shared, &format!("{name} exited: {s}")),
+                                    Err(e) => say(shared, &format!("{name}: {e}")),
+                                }
+                            }
+                            _ => say(
+                                shared,
+                                &text.unwrap_or_else(|| {
+                                    format!("{name} needs an interactive terminal")
+                                }),
+                            ),
+                        }
                     }
 
                     CommandOutcome::Panel(spec) => {

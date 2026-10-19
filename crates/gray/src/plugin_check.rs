@@ -24,6 +24,9 @@ fn outcome_text(o: &gray_core::agent::CommandOutcome) -> String {
         gray_core::agent::CommandOutcome::Picker(spec) => {
             format!("picker: {} ({} items)", spec.title, spec.items.len())
         }
+        gray_core::agent::CommandOutcome::Terminal { argv, .. } => {
+            format!("terminal: {}", argv.join(" "))
+        }
     }
 }
 
