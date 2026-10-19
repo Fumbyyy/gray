@@ -191,6 +191,7 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                 Some(CommandOutcome::Say(text)) => super::say(tui, &text),
                 Some(CommandOutcome::Prompt(prompt)) => {
                     let mut t = ctx.tui.lock().expect("tui lock");
+                    t.push_user_prompt(&prompt, &[], !prompt.starts_with('/'));
                     t.queued_inputs.push_back((prompt, Vec::new()));
                     let _ = t.draw();
                 }
@@ -221,6 +222,7 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                     // modal surface — rerun through the full dispatch once
                     // the turn ends instead of racing the running turn.
                     let mut t = ctx.tui.lock().expect("tui lock");
+                    t.push_user_prompt(&cmd, &[], false);
                     t.queued_inputs.push_back((cmd.clone(), Vec::new()));
                     let _ = t.draw();
                 }
@@ -245,6 +247,34 @@ fn lock_tui<T>(shared: &std::sync::Arc<std::sync::Mutex<T>>) -> std::sync::Mutex
     shared.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The keyboard-enhancement push/pop writes raw escapes to stdout; on this
+/// thread they race the composer's draws and a torn `\x1b[>5u` leaks its
+/// tail as literal text. Run both under the tui lock.
+struct LockedEnhancement {
+    inner: Option<crate::term_keys::KeyboardEnhancementGuard>,
+    tui: TuiOpt,
+}
+
+impl LockedEnhancement {
+    fn push(tui: TuiOpt) -> Self {
+        let inner = {
+            let _tui = tui.as_ref().map(|s| lock_tui(s));
+            crate::term_keys::KeyboardEnhancementGuard::push()
+        };
+        Self {
+            inner: Some(inner),
+            tui,
+        }
+    }
+}
+
+impl Drop for LockedEnhancement {
+    fn drop(&mut self) {
+        let _tui = self.tui.as_ref().map(|s| lock_tui(s));
+        drop(self.inner.take());
+    }
+}
+
 pub(crate) fn spawn_key_watcher_with_typing(
     watch_cancel: Cancel,
     watcher_stopped: Stop,
@@ -255,7 +285,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
     tokio::task::spawn_blocking(move || {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
 
-        let _keyboard_enhancement = crate::term_keys::KeyboardEnhancementGuard::push();
+        let _keyboard_enhancement = LockedEnhancement::push(watcher_tui.clone());
         crate::composer::input::watch_dead_stdin();
         loop {
             if watcher_stopped.load(std::sync::atomic::Ordering::Relaxed) {
@@ -377,6 +407,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                 run_turn_local_command(locals, &cmd);
                                 continue;
                             }
+                            t.push_user_prompt(&cmd, &[], false);
                             t.queued_inputs.push_back((cmd, Vec::new()));
                             t.matches.clear();
                             t.sel = 0;
@@ -415,6 +446,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                             let attached: Vec<std::path::PathBuf> =
                                 std::mem::take(&mut t.attachments);
 
+                            t.push_user_prompt(&text, &attached, !text.starts_with('/'));
                             t.queued_inputs.push_back((text, attached));
                             t.textarea.set_text("");
                             t.pending_pastes.clear();
