@@ -3423,7 +3423,7 @@ impl GrayApp {
             modes = modes.child(
                 opt(
                     SharedString::from(format!("settings-mode-{id}")),
-                    *label,
+                    label,
                     dmode == *id,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
