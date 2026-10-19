@@ -234,9 +234,8 @@ mod parse_tests {
 
     #[test]
     fn truncated_array_block_recovers_complete_elements() {
-        let v = parse(
-            "[{\"name\": \"bash\", \"arguments\": {\"command\": \"pwd\"}}, {\"name\": \"rea",
-        );
+        let v =
+            parse("[{\"name\": \"bash\", \"arguments\": {\"command\": \"pwd\"}}, {\"name\": \"rea");
         assert!(v.is_array());
         assert_eq!(v[0]["name"], "bash");
     }
