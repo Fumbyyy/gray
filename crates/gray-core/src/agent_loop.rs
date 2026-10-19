@@ -258,7 +258,11 @@ impl Agent {
             if !out.is_error {
                 ran += 1;
             }
-            sections.push(format!("== call {}/{total}: {name} ==\n{}", i + 1, out.content));
+            sections.push(format!(
+                "== call {}/{total}: {name} ==\n{}",
+                i + 1,
+                out.content
+            ));
         }
         let mut head = format!("tool-call block: ran {ran}/{total} call(s)");
         if dropped > 0 {
@@ -1477,12 +1481,7 @@ impl Agent {
                         .execute_call_block(&ctx, calls, dropped, parse_error)
                         .await;
                     let output = self.apply_tool_after(name, &output).await;
-                    Self::bill_tool_usage(
-                        &mut billed,
-                        name,
-                        &output,
-                        ctx.session_id.as_deref(),
-                    );
+                    Self::bill_tool_usage(&mut billed, name, &output, ctx.session_id.as_deref());
                     for hook in &self.hooks {
                         hook.post_tool(name, &output).await;
                     }

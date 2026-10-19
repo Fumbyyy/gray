@@ -3503,14 +3503,17 @@ async fn valid_calls_block_expands_and_runs_each_call() {
     let executor = FakeExecutor::new(ToolOutput::ok("hit"));
     let call_log = executor.calls.clone();
     let call_args = executor.call_args.clone();
-    let mut agent =
-        Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
+    let mut agent = Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
     let events = agent
         .run(Message::user("go"), ToolContext::default())
         .await
         .unwrap();
     let logged = call_args.lock().expect("args lock");
-    assert_eq!(logged.len(), 2, "both block elements should run: {logged:?}");
+    assert_eq!(
+        logged.len(),
+        2,
+        "both block elements should run: {logged:?}"
+    );
     assert_eq!(logged[0].1["q"], 1);
     assert_eq!(logged[1].1["q"], 2);
     drop(logged);
@@ -3545,8 +3548,7 @@ async fn malformed_calls_block_runs_salvageable_elements() {
     ]);
     let executor = FakeExecutor::new(ToolOutput::ok("hit"));
     let call_args = executor.call_args.clone();
-    let mut agent =
-        Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
+    let mut agent = Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
     let events = agent
         .run(Message::user("go"), ToolContext::default())
         .await
@@ -3558,9 +3560,7 @@ async fn malformed_calls_block_runs_salvageable_elements() {
     let output = events
         .iter()
         .find_map(|e| match e {
-            AgentEvent::ToolResult { id, output, .. } if id == "c-block" => {
-                Some(output.clone())
-            }
+            AgentEvent::ToolResult { id, output, .. } if id == "c-block" => Some(output.clone()),
             _ => None,
         })
         .expect("expected a merged result for the block");

@@ -1003,7 +1003,13 @@ async fn plugin_command_result(
         ))),
         Some(gray_plugin::CommandOutcome::ModelPicker(_))
         | Some(gray_plugin::CommandOutcome::AgentPicker(_))
-        | Some(gray_plugin::CommandOutcome::SubagentSettings(_)) => Err(CmdError::local(name)),
+        | Some(gray_plugin::CommandOutcome::SubagentSettings(_))
+        | Some(gray_plugin::CommandOutcome::Terminal { text: None, .. }) => {
+            Err(CmdError::local(name))
+        }
+        Some(gray_plugin::CommandOutcome::Terminal {
+            text: Some(text), ..
+        }) => Ok(Some(CommandResult::text(text))),
         None => Err(CmdError::local(name)),
     }
 }
