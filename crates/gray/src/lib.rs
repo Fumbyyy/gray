@@ -51,6 +51,7 @@ pub mod tui;
 pub mod turn_caps;
 pub mod update;
 pub(crate) mod util;
+pub mod win_paste;
 
 use clap::{ArgGroup, Parser};
 use std::path::{Path, PathBuf};
