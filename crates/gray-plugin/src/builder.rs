@@ -148,6 +148,20 @@ pub fn spawn_outcomes() -> Option<Vec<SpawnOutcome>> {
     SPAWN_OUTCOMES.lock().ok().and_then(|s| s.clone())
 }
 
+fn host_triple() -> &'static str {
+    if cfg!(windows) {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(target_os = "macos") {
+        "x86_64-apple-darwin"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-musl"
+    } else {
+        "x86_64-unknown-linux-musl"
+    }
+}
+
 pub fn resolve_argv(dir: &Path) -> anyhow::Result<Vec<String>> {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -174,26 +188,15 @@ pub fn resolve_argv(dir: &Path) -> anyhow::Result<Vec<String>> {
     if !dir.is_dir() {
         anyhow::bail!("{} is not a directory (or executable)", dir.display());
     }
-    let script = dir.join("plugin.sh");
-    if is_exec(&script) {
-        return Ok(vec![script.to_string_lossy().into_owned()]);
-    }
-    let triple = if cfg!(windows) {
-        "x86_64-pc-windows-msvc"
-    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "aarch64-apple-darwin"
-    } else if cfg!(target_os = "macos") {
-        "x86_64-apple-darwin"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64-unknown-linux-musl"
-    } else {
-        "x86_64-unknown-linux-musl"
-    };
-    let leg_dir = dir.join(triple);
+    let leg_dir = dir.join(host_triple());
     if leg_dir.is_dir()
         && let Ok(argv) = resolve_argv(&leg_dir)
     {
         return Ok(argv);
+    }
+    let script = dir.join("plugin.sh");
+    if is_exec(&script) {
+        return Ok(vec![script.to_string_lossy().into_owned()]);
     }
     let mut execs = Vec::new();
     for entry in std::fs::read_dir(dir)? {

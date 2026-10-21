@@ -315,3 +315,55 @@ async fn a_plain_lock_plugin_stays_dormant() {
         "an undeclared command must not wake a dormant plugin"
     );
 }
+
+fn set_exec(p: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+    }
+}
+
+#[test]
+fn resolve_argv_prefers_host_triple_leg_over_plugin_sh() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("plugin.sh");
+    std::fs::write(&script, "#!/bin/sh\n").unwrap();
+    set_exec(&script);
+    let leg = dir.path().join(host_triple());
+    std::fs::create_dir(&leg).unwrap();
+    let bin = leg.join(if cfg!(windows) {
+        "gray-loop.exe"
+    } else {
+        "gray-loop"
+    });
+    std::fs::write(&bin, "bin").unwrap();
+    set_exec(&bin);
+    let argv = resolve_argv(dir.path()).unwrap();
+    assert_eq!(argv, vec![bin.to_string_lossy().into_owned()]);
+}
+
+#[test]
+fn resolve_argv_falls_back_to_plugin_sh_without_leg() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("plugin.sh");
+    std::fs::write(&script, "#!/bin/sh\n").unwrap();
+    set_exec(&script);
+    let argv = resolve_argv(dir.path()).unwrap();
+    assert_eq!(argv, vec![script.to_string_lossy().into_owned()]);
+}
+
+#[test]
+fn resolve_argv_falls_back_to_plugin_sh_when_leg_is_unusable() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("plugin.sh");
+    std::fs::write(&script, "#!/bin/sh\n").unwrap();
+    set_exec(&script);
+    std::fs::create_dir(dir.path().join(host_triple())).unwrap();
+    let argv = resolve_argv(dir.path()).unwrap();
+    assert_eq!(argv, vec![script.to_string_lossy().into_owned()]);
+}
